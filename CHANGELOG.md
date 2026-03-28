@@ -2,7 +2,12 @@
 
 ## Unreleased
 
-Nothing yet.
+Live startup behavior clarified and hardened.
+
+- Kept live-mode protocol automation while explicitly leaving CLI-native safety/trust confirmations as manual supervisor actions.
+- Switched live Claude sessions to `--permission-mode bypassPermissions` so tool-level prompts are minimized once the human confirms startup.
+- Kept live Codex startup on the interactive CLI path and documented that workspace trust remains a manual confirmation point there.
+- Updated the English README, Chinese README, and `peer-forge-live` skill docs to document the expected manual confirmation points instead of pretending they are fully unattended.
 
 ## v0.10.0 - 2026-03-29
 

@@ -187,6 +187,13 @@ Current live scope:
 - symmetric supervisor notes only
 - no implementation phase yet
 
+Startup note:
+
+- The protocol continues automatically after startup, but CLI-native safety prompts are still manual by design.
+- In practice, Claude may ask you to confirm entering `bypassPermissions` mode.
+- Codex may also ask you to trust the generated workspace on some machines or first-run states.
+- We intentionally do not auto-press those prompts via tmux, because that is more brittle than letting the human supervisor confirm them once.
+
 Inside the supervisor pane, the main commands are:
 
 - `status`

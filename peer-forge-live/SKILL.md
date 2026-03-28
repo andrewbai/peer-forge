@@ -21,6 +21,7 @@ Current scope:
 - no code writing
 - no apply-final
 - no asymmetric supervisor notes
+- protocol automation after startup, but CLI-native safety/trust prompts remain manual on purpose
 
 ## Requirements
 
@@ -70,6 +71,13 @@ If the user wants the tmux session created without auto-attach:
   --task "用户的原始任务" \
   --no-attach
 ```
+
+Important startup behavior:
+
+- Do not promise a fully unattended start.
+- The live protocol runs automatically after startup, but Claude's own `bypassPermissions` confirmation may still need a human to accept.
+- Codex may also show a trust confirmation depending on local CLI state and workspace history.
+- This is intentional. Do not implement tmux keypress hacks unless the user explicitly asks for that tradeoff.
 
 ## Live Supervisor Commands
 

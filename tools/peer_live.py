@@ -3,13 +3,10 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 from pathlib import Path
 import re
 import select
-import shutil
 import sys
-import textwrap
 import time
 import traceback
 import uuid
@@ -35,11 +32,10 @@ from live_tmux import (
     new_session,
     paste_message,
     pipe_pane,
+    respawn_pane,
     select_layout,
-    send_shell_command,
     set_pane_title,
     set_remain_on_exit,
-    shell_join,
     split_window,
 )
 from peer_consensus import (
@@ -248,6 +244,11 @@ def turn_dir_for(state: dict[str, Any], turn_id: str) -> Path:
     return Path(state["run_dir"]) / "turns" / turn_id
 
 
+def session_prompt_path_for(state: dict[str, Any], turn_id: str, agent: str) -> Path:
+    workspace = Path(state["agents"][agent]["workspace"])
+    return workspace / ".peer-forge-live" / "turns" / turn_id / "prompt.txt"
+
+
 def current_turn(state: dict[str, Any]) -> dict[str, Any]:
     if not state["turns"]:
         raise RuntimeError("No turn has been created.")
@@ -414,6 +415,7 @@ def inspect_agent(state: dict[str, Any], agent: str) -> list[str]:
         f"Pane: {agent_state['pane_id']}",
         f"Workspace: {agent_state['workspace']}",
         f"Prompt: {turn_agent.get('prompt_path', '') or '(none)'}",
+        f"Session prompt: {turn_agent.get('session_prompt_path', '') or '(none)'}",
         f"Raw log: {agent_state['raw_log_path']}",
         f"Turn log: {turn_agent.get('turn_log_path', '') or '(none)'}",
         f"Result file: {turn_agent.get('result_path', '') or '(none)'}",
@@ -541,16 +543,19 @@ def prepare_turn(
     for agent in AGENTS:
         raw_path = raw_log_path(state, agent)
         prompt_path = turn_dir / agent / "prompt.txt"
+        session_prompt_path = session_prompt_path_for(state, turn_id, agent)
         result_path = turn_dir / agent / "result.json"
         turn_log_path = turn_dir / agent / "turn.log"
         is_active = agent in active_agents
         if is_active:
             write_text(prompt_path, prompt_texts[agent].strip() + "\n")
+            write_text(session_prompt_path, prompt_texts[agent].strip() + "\n")
             write_text(turn_log_path, "")
         turn["agents"][agent] = {
             "active": is_active,
             "status": "pending" if is_active else "skipped",
             "prompt_path": str(prompt_path) if is_active else "",
+            "session_prompt_path": str(session_prompt_path) if is_active else "",
             "result_path": str(result_path) if is_active else "",
             "turn_log_path": str(turn_log_path) if is_active else "",
             "turn_start_offset": raw_path.stat().st_size if raw_path.exists() else 0,
@@ -570,8 +575,14 @@ def dispatch_turn(
     state: dict[str, Any],
     turn: dict[str, Any],
     *,
-    launch_commands: dict[str, str] | None = None,
+    send_prompts: bool = True,
 ) -> None:
+    # Precondition: dispatch a follow-up turn only after wait_for_turn() has
+    # observed the previous turn finish and both interactive CLIs are back at
+    # an input-ready prompt. paste_message() injects text into the live TTY; if
+    # a caller reorders phases and sends while an agent is still streaming its
+    # previous response, the pasted prompt can be lost or interleaved with the
+    # active output.
     turn["started_at"] = utc_timestamp_precise()
     turn["status"] = "running"
     for agent in AGENTS:
@@ -579,15 +590,14 @@ def dispatch_turn(
         if not turn_agent["active"]:
             continue
         turn_agent["status"] = "running"
-        turn_agent["turn_start_offset"] = raw_log_path(state, agent).stat().st_size if raw_log_path(state, agent).exists() else 0
+        if send_prompts:
+            turn_agent["turn_start_offset"] = raw_log_path(state, agent).stat().st_size if raw_log_path(state, agent).exists() else 0
         turn_agent["parse_error"] = ""
         turn_agent["result"] = None
-        if launch_commands and agent in launch_commands:
-            send_shell_command(state["agents"][agent]["pane_id"], launch_commands[agent])
-        else:
+        if send_prompts:
             paste_message(
                 state["agents"][agent]["pane_id"],
-                prompt_file_message(Path(turn_agent["prompt_path"])),
+                prompt_file_message(Path(turn_agent["session_prompt_path"])),
             )
     save_state(state)
     write_supervisor_event(
@@ -705,39 +715,36 @@ def pause_for_boundary(state: dict[str, Any], *, label: str, next_phase: str | N
             raise KeyboardInterrupt("Supervisor aborted the live run.")
 
 
-def build_claude_shell_command(
+def build_claude_command(
     *,
-    run_id: str,
-    run_dir: Path,
     model: str | None,
     bare: bool,
     prompt_path: Path,
-) -> str:
+) -> list[str]:
     cmd = [
         "claude",
         "--permission-mode",
-        "plan",
-        "--add-dir",
-        str(run_dir),
+        # Minimize tool-level prompts during the live run. Claude may still
+        # show its own startup bypass warning, which we intentionally leave
+        # for the human supervisor to confirm manually.
+        "bypassPermissions",
         "--name",
-        f"peer-forge-live-claude-{run_id}",
+        "peer-forge-live-claude",
     ]
     if bare:
         cmd.append("--bare")
     if model:
         cmd.extend(["--model", model])
     cmd.append(prompt_file_message(prompt_path))
-    return shell_join(cmd)
+    return cmd
 
 
-def build_codex_shell_command(
+def build_codex_command(
     *,
-    run_id: str,
     workspace: Path,
-    run_dir: Path,
     model: str | None,
     prompt_path: Path,
-) -> str:
+) -> list[str]:
     cmd = [
         "codex",
         "-C",
@@ -747,17 +754,19 @@ def build_codex_shell_command(
         "-a",
         "never",
         "--no-alt-screen",
-        "--add-dir",
-        str(run_dir),
     ]
     if model:
         cmd.extend(["-m", model])
     cmd.append(prompt_file_message(prompt_path))
-    return shell_join(cmd)
+    return cmd
 
 
-def build_supervisor_shell_command(state_file: Path) -> str:
-    return shell_join(["python3", str(Path(__file__).resolve()), "serve", "--state-file", str(state_file)])
+def build_supervisor_command(state_file: Path) -> list[str]:
+    return ["python3", str(Path(__file__).resolve()), "serve", "--state-file", str(state_file)]
+
+
+def placeholder_command() -> list[str]:
+    return ["sleep", "3600"]
 
 
 def summarize_signoff_objections(signoffs: dict[str, dict[str, Any]]) -> dict[str, Any]:
@@ -820,6 +829,7 @@ def build_report(state: dict[str, Any]) -> dict[str, Any]:
                         "active": turn["agents"][agent]["active"],
                         "status": turn["agents"][agent]["status"],
                         "prompt_path": turn["agents"][agent]["prompt_path"],
+                        "session_prompt_path": turn["agents"][agent]["session_prompt_path"],
                         "result_path": turn["agents"][agent]["result_path"],
                         "turn_log_path": turn["agents"][agent]["turn_log_path"],
                     }
@@ -1250,15 +1260,29 @@ def start_mode(args: argparse.Namespace) -> int:
     save_state(state)
 
     initial_turn = create_initial_turn(state)
-    claude_prompt_path = Path(initial_turn["agents"]["claude"]["prompt_path"])
-    codex_prompt_path = Path(initial_turn["agents"]["codex"]["prompt_path"])
+    claude_prompt_path = Path(initial_turn["agents"]["claude"]["session_prompt_path"])
+    codex_prompt_path = Path(initial_turn["agents"]["codex"]["session_prompt_path"])
 
     created_session = False
     try:
-        claude_pane = new_session(session_name, cwd=workspaces.claude)
+        claude_pane = new_session(
+            session_name,
+            cwd=workspaces.claude,
+            command=placeholder_command(),
+        )
         created_session = True
-        codex_pane = split_window(claude_pane, cwd=workspaces.codex, direction="horizontal")
-        supervisor_pane = split_window(claude_pane, cwd=run_dir, direction="vertical")
+        codex_pane = split_window(
+            claude_pane,
+            cwd=workspaces.codex,
+            direction="horizontal",
+            command=placeholder_command(),
+        )
+        supervisor_pane = split_window(
+            claude_pane,
+            cwd=run_dir,
+            direction="vertical",
+            command=placeholder_command(),
+        )
         set_remain_on_exit(session_name, enabled=True)
         select_layout(session_name, "tiled")
         set_pane_title(claude_pane, "peer-forge-live:claude")
@@ -1274,29 +1298,29 @@ def start_mode(args: argparse.Namespace) -> int:
         state["agents"]["supervisor"]["pane_id"] = supervisor_pane
         save_state(state)
 
-        dispatch_turn(
-            state,
-            initial_turn,
-            launch_commands={
-                "claude": build_claude_shell_command(
-                    run_id=run_id,
-                    run_dir=run_dir,
-                    model=args.claude_model,
-                    bare=not args.no_claude_bare,
-                    prompt_path=claude_prompt_path,
-                ),
-                "codex": build_codex_shell_command(
-                    run_id=run_id,
-                    workspace=workspaces.codex,
-                    run_dir=run_dir,
-                    model=args.codex_model,
-                    prompt_path=codex_prompt_path,
-                ),
-            },
+        dispatch_turn(state, initial_turn, send_prompts=False)
+        respawn_pane(
+            claude_pane,
+            cwd=workspaces.claude,
+            command=build_claude_command(
+                model=args.claude_model,
+                bare=not args.no_claude_bare,
+                prompt_path=claude_prompt_path,
+            ),
         )
-        send_shell_command(
+        respawn_pane(
+            codex_pane,
+            cwd=workspaces.codex,
+            command=build_codex_command(
+                workspace=workspaces.codex,
+                model=args.codex_model,
+                prompt_path=codex_prompt_path,
+            ),
+        )
+        respawn_pane(
             supervisor_pane,
-            build_supervisor_shell_command(state_path_from_run_dir(run_dir)),
+            cwd=run_dir,
+            command=build_supervisor_command(state_path_from_run_dir(run_dir)),
         )
     except Exception:
         if created_session:

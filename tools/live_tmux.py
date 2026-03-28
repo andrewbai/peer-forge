@@ -33,6 +33,14 @@ def run_tmux(args: list[str], *, check: bool = True) -> subprocess.CompletedProc
     return proc
 
 
+def first_pane_id(target: str) -> str:
+    proc = run_tmux(["list-panes", "-t", target, "-F", "#{pane_id}"])
+    pane_ids = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+    if not pane_ids:
+        raise TmuxError(f"tmux did not return any panes for target {target!r}.")
+    return pane_ids[0]
+
+
 def has_session(session_name: str) -> bool:
     return run_tmux(["has-session", "-t", session_name], check=False).returncode == 0
 
@@ -41,24 +49,26 @@ def kill_session(session_name: str) -> None:
     run_tmux(["kill-session", "-t", session_name], check=False)
 
 
-def new_session(session_name: str, *, cwd: Path, shell: str = "/bin/zsh") -> str:
-    proc = run_tmux(
-        [
-            "new-session",
-            "-d",
-            "-s",
-            session_name,
-            "-c",
-            str(cwd),
-            "-P",
-            "-F",
-            "#{pane_id}",
-            shell,
-        ]
-    )
+def new_session(session_name: str, *, cwd: Path, command: list[str] | None = None, shell: str = "/bin/zsh") -> str:
+    tmux_args = [
+        "new-session",
+        "-d",
+        "-s",
+        session_name,
+        "-c",
+        str(cwd),
+        "-P",
+        "-F",
+        "#{pane_id}",
+    ]
+    if command is None:
+        tmux_args.append(shell)
+    else:
+        tmux_args.extend(command)
+    proc = run_tmux(tmux_args)
     pane_id = proc.stdout.strip()
     if not pane_id:
-        raise TmuxError(f"tmux did not return a pane id for new session {session_name!r}.")
+        pane_id = first_pane_id(session_name)
     return pane_id
 
 
@@ -67,27 +77,30 @@ def split_window(
     *,
     cwd: Path,
     direction: str,
+    command: list[str] | None = None,
     shell: str = "/bin/zsh",
 ) -> str:
     flag = "-h" if direction == "horizontal" else "-v"
-    proc = run_tmux(
-        [
-            "split-window",
-            "-d",
-            flag,
-            "-t",
-            target_pane,
-            "-c",
-            str(cwd),
-            "-P",
-            "-F",
-            "#{pane_id}",
-            shell,
-        ]
-    )
+    tmux_args = [
+        "split-window",
+        "-d",
+        flag,
+        "-t",
+        target_pane,
+        "-c",
+        str(cwd),
+        "-P",
+        "-F",
+        "#{pane_id}",
+    ]
+    if command is None:
+        tmux_args.append(shell)
+    else:
+        tmux_args.extend(command)
+    proc = run_tmux(tmux_args)
     pane_id = proc.stdout.strip()
     if not pane_id:
-        raise TmuxError(f"tmux did not return a pane id for split {target_pane!r}.")
+        pane_id = first_pane_id(target_pane)
     return pane_id
 
 
@@ -107,6 +120,20 @@ def pipe_pane(pane_id: str, log_path: Path) -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     command = f"cat >> {shlex.quote(str(log_path))}"
     run_tmux(["pipe-pane", "-o", "-t", pane_id, command])
+
+
+def respawn_pane(pane_id: str, *, cwd: Path, command: list[str]) -> None:
+    run_tmux(
+        [
+            "respawn-pane",
+            "-k",
+            "-t",
+            pane_id,
+            "-c",
+            str(cwd),
+            *command,
+        ]
+    )
 
 
 def send_shell_command(pane_id: str, command: str) -> None:

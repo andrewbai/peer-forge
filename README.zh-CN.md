@@ -193,6 +193,13 @@ git --version
 - 只允许对称 supervisor note
 - 还没有实现 execution 阶段
 
+启动说明：
+
+- 协议本身在启动后会自动继续跑，但 CLI 自己的原生安全确认仍然保留人工处理。
+- 实际上，Claude 可能会先让你确认是否进入 `bypassPermissions` 模式。
+- 在某些机器或首次进入新工作区时，Codex 也可能会先要求你确认 trust。
+- 这里故意不做 tmux 自动按键确认，因为那种做法比人工确认一次更脆弱，也更容易被 CLI 升级打断。
+
 supervisor pane 里的主要命令：
 
 - `status`
