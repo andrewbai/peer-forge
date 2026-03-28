@@ -106,6 +106,24 @@ For a real apply plus git commit:
   --commit
 ```
 
+If the user wants to control the landing branch explicitly:
+
+```bash
+~/.claude/skills/peer-forge/bin/peer-forge-live apply \
+  --state-file /path/to/state.json \
+  --apply \
+  --branch peer-forge/custom-branch
+```
+
+If the user wants to stay on the current branch instead of creating the default `peer-forge/<run-id>` branch:
+
+```bash
+~/.claude/skills/peer-forge/bin/peer-forge-live apply \
+  --state-file /path/to/state.json \
+  --apply \
+  --branch current
+```
+
 Important startup behavior:
 
 - Do not promise a fully unattended start.
@@ -143,6 +161,8 @@ Live apply rules:
 - The default landing branch is `peer-forge/<run-id>`.
 - Apply is allowed only after approved plan and approved execution.
 - Apply currently requires a clean git-backed target repo.
+- If the repo HEAD has drifted since the live run started, apply is blocked by default.
+- `--allow-base-drift` is the explicit override for that baseline drift check.
 
 ## When To Prefer `peer-consensus`
 
