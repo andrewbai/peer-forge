@@ -4,6 +4,17 @@
 
 Nothing yet.
 
+## v0.13.0 - 2026-03-29
+
+Live apply / landing from approved execution packages.
+
+- Added `peer-forge-live apply --state-file ...` with dry-run preview by default and explicit `--apply` for real repo writes.
+- Landed approved live runs from the persisted execution package instead of trusting the live agent workspaces directly.
+- Added safety checks for clean git-backed target repos, expected baseline HEAD, default `peer-forge/<run-id>` landing branches, and optional post-apply commits.
+- Added per-apply audit artifacts under `apply/`, including `history.jsonl`, JSON reports, Markdown reports, and main live report integration.
+- Added `scripts/live-apply-smoke.sh` to verify preview, apply+commit, and base-drift rejection behavior.
+- Updated the English README, Chinese README, and `peer-forge-live` skill docs for the new apply flow and safety model.
+
 ## v0.12.0 - 2026-03-29
 
 Live supervisor recovery and richer inspection.
