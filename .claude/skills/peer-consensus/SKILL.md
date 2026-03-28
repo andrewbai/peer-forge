@@ -2,18 +2,18 @@
 name: peer-consensus
 description: |
   Run a full dual-agent consensus workflow with Claude Code and Codex: isolated workspaces,
-  independent solutions, cross-review, revision, consensus merge, and final sign-off from both sides.
+  plan consensus first, then single-agent execution plus peer review.
   Use when the user wants two peer coding agents that do not contaminate each other's initial work.
 ---
 
 # peer-consensus
 
 Use this skill when the user wants Claude Code and Codex to behave like two peer students:
-- both solve the same task independently
-- both review each other's work
-- both revise
-- both converge on a stronger final answer
-- both explicitly sign off, or raise blocking objections
+- both produce plans independently
+- both review and revise plans
+- both converge on one final plan
+- one side executes the chosen plan
+- the other side reviews the implementation result
 
 This skill is powered by:
 
@@ -21,10 +21,12 @@ This skill is powered by:
 python3 tools/peer_consensus.py --help
 ```
 
-## Required Inputs
+## Inputs
 
-Before you run it, define:
+Minimum:
 - the task
+
+Optional:
 - acceptance criteria
 - preferred scope
 
@@ -55,7 +57,9 @@ python3 tools/peer_consensus.py \
 ## Notes
 
 - The script creates isolated workspaces under `.claude/tmp/peer-consensus/`.
-- Independent paired phases such as initial solve, cross-review, revision, consensus, and sign-off run in parallel.
+- The plan phases are read-only: plan, cross-review, revision, and consensus.
+- The execution phase is single-writer: the chosen side writes code, the other side reviews.
+- Independent paired plan phases run in parallel.
 - Claude runs in `--bare` mode by default to reduce prompt contamination.
 - The protocol is round-based, not free-form multi-agent chat.
-- The script exits non-zero if the final candidate is not approved by both agents.
+- The script exits non-zero if the implementation review does not reach approval.

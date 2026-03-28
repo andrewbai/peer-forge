@@ -5,15 +5,16 @@
 Standalone toolkit for running a dual-agent coding workflow with Claude Code and Codex:
 
 - isolated workspaces
-- independent initial solutions
-- cross-review
-- revision
-- consensus merge
-- final sign-off from both sides
+- independent planning
+- plan cross-review
+- plan revision
+- plan consensus
+- one-sided execution
+- peer implementation review
 
 This repo is meant to live on its own and be synced into future projects when needed.
 
-Current version: `v0.1.0`
+Current version: `v0.2.0`
 
 ## Structure
 
@@ -121,12 +122,12 @@ Add `--scope` and `--acceptance` only when useful.
 ## What The Workflow Does
 
 1. Creates isolated Claude and Codex workspaces.
-2. Runs independent paired phases in parallel when possible.
-3. Makes each side review the other side's work.
-4. Lets each side revise after review.
-5. Asks both sides to state what must be preserved and what still blocks approval.
-6. Builds a final candidate from the stronger base.
-7. Requires sign-off from both sides, with bounded objection/fix rounds.
+2. Runs independent planning phases in parallel when possible.
+3. Makes each side review and revise the other side's plan.
+4. Uses consensus to choose the final plan base.
+5. Produces one final implementation plan.
+6. Lets the chosen side execute that plan.
+7. Lets the other side review the implementation result, with bounded fix-review rounds if needed.
 
 ## Artifacts
 
@@ -143,7 +144,8 @@ That directory includes:
 - prompts
 - model outputs
 - per-stage diff packages
-- sign-off results
+- final plan
+- implementation review results
 - `report.json`
 - `report.md`
 
@@ -157,7 +159,7 @@ Task-only usage is valid.
 
 ### `peer-consensus`
 
-The lower-level workflow when you want more explicit control over task, acceptance criteria, and scope.
+The lower-level workflow when you want more explicit control over task, acceptance criteria, scope, and the exact two-phase protocol.
 
 ### `codex-collab`
 

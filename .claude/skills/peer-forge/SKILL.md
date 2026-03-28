@@ -2,8 +2,8 @@
 name: peer-forge
 description: |
   Productized entrypoint for the Peer Forge workflow. Use when the user wants Claude Code and Codex
-  to work like two peer students: independent first draft, cross-review, revision, consensus merge,
-  and final dual sign-off. Task-only usage is allowed. Acceptance criteria are optional.
+  to work like two peer students: independent planning first, plan review, plan consensus,
+  then one side executes and the other side reviews. Task-only usage is allowed. Acceptance criteria are optional.
 ---
 
 # peer-forge
@@ -76,11 +76,12 @@ python3 tools/peer_consensus.py \
 The "验收机制" here is not only user-written acceptance criteria.
 
 When explicit acceptance criteria are missing, the workflow still converges through:
-- independent implementation
-- cross-review
-- revision
-- consensus merge
-- dual sign-off
+- independent planning
+- plan cross-review
+- plan revision
+- plan consensus
+- one-sided execution
+- peer implementation review
 
 That means task-only usage is valid.
 

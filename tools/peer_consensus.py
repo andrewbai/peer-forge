@@ -28,34 +28,37 @@ SEVERITY_WEIGHTS = {
 }
 
 
-SOLUTION_SCHEMA: dict[str, Any] = {
+PLAN_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
     "required": [
         "summary",
-        "changed_files",
+        "scope",
+        "steps",
         "strengths",
-        "known_risks",
+        "risks",
         "tests",
         "assumptions",
     ],
     "properties": {
         "summary": {"type": "string"},
-        "changed_files": {"type": "array", "items": {"type": "string"}},
+        "scope": {"type": "array", "items": {"type": "string"}},
+        "steps": {"type": "array", "items": {"type": "string"}},
         "strengths": {"type": "array", "items": {"type": "string"}},
-        "known_risks": {"type": "array", "items": {"type": "string"}},
+        "risks": {"type": "array", "items": {"type": "string"}},
         "tests": {"type": "array", "items": {"type": "string"}},
         "assumptions": {"type": "array", "items": {"type": "string"}},
     },
 }
 
 
-REVISION_SCHEMA: dict[str, Any] = {
+PLAN_REVISION_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
     "required": [
         "summary",
-        "changed_files",
+        "scope",
+        "steps",
         "accepted_review_items",
         "rejected_review_items",
         "adopted_peer_strengths",
@@ -64,12 +67,37 @@ REVISION_SCHEMA: dict[str, Any] = {
     ],
     "properties": {
         "summary": {"type": "string"},
-        "changed_files": {"type": "array", "items": {"type": "string"}},
+        "scope": {"type": "array", "items": {"type": "string"}},
+        "steps": {"type": "array", "items": {"type": "string"}},
         "accepted_review_items": {"type": "array", "items": {"type": "string"}},
         "rejected_review_items": {"type": "array", "items": {"type": "string"}},
         "adopted_peer_strengths": {"type": "array", "items": {"type": "string"}},
         "remaining_risks": {"type": "array", "items": {"type": "string"}},
         "tests": {"type": "array", "items": {"type": "string"}},
+    },
+}
+
+
+FINAL_PLAN_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "summary",
+        "scope",
+        "steps",
+        "preserved_strengths",
+        "remaining_risks",
+        "tests",
+        "assumptions",
+    ],
+    "properties": {
+        "summary": {"type": "string"},
+        "scope": {"type": "array", "items": {"type": "string"}},
+        "steps": {"type": "array", "items": {"type": "string"}},
+        "preserved_strengths": {"type": "array", "items": {"type": "string"}},
+        "remaining_risks": {"type": "array", "items": {"type": "string"}},
+        "tests": {"type": "array", "items": {"type": "string"}},
+        "assumptions": {"type": "array", "items": {"type": "string"}},
     },
 }
 
@@ -150,15 +178,22 @@ CONSENSUS_SCHEMA: dict[str, Any] = {
 }
 
 
-SIGNOFF_SCHEMA: dict[str, Any] = {
+EXECUTION_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["approved", "summary", "blocking_objections", "must_keep"],
+    "required": [
+        "summary",
+        "changed_files",
+        "tests",
+        "remaining_risks",
+        "assumptions",
+    ],
     "properties": {
-        "approved": {"type": "boolean"},
         "summary": {"type": "string"},
-        "blocking_objections": {"type": "array", "items": FINDING_SCHEMA},
-        "must_keep": {"type": "array", "items": {"type": "string"}},
+        "changed_files": {"type": "array", "items": {"type": "string"}},
+        "tests": {"type": "array", "items": {"type": "string"}},
+        "remaining_risks": {"type": "array", "items": {"type": "string"}},
+        "assumptions": {"type": "array", "items": {"type": "string"}},
     },
 }
 
@@ -224,8 +259,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--signoff-rounds",
         type=int,
-        default=2,
-        help="Maximum additional fix/sign-off rounds after the first candidate final. Default: 2.",
+        default=1,
+        help="Maximum additional execute-fix-review rounds after the first implementation review. Default: 1.",
     )
     parser.add_argument(
         "--apply-final",
@@ -589,57 +624,220 @@ def prompt_header(task: str, acceptance: list[str], scope: list[str]) -> str:
     ).strip()
 
 
-def build_initial_prompt(agent: str, task: str, acceptance: list[str], scope: list[str]) -> str:
+def build_plan_prompt(agent: str, task: str, acceptance: list[str], scope: list[str]) -> str:
     return textwrap.dedent(
         f"""
         You are {agent} in a dual-agent peer consensus protocol.
 
-        Your job in this phase is to solve the task independently, as if the other agent does not exist.
-        Do not speculate about the peer solution. Do not ask for a merge strategy yet.
+        This phase is plan-only. Do not modify code. Do not create commits, branches, or tags.
+        Produce the best implementation plan you can, as if the other agent does not exist.
 
         {prompt_header(task, acceptance, scope)}
 
         Instructions:
         - Work only inside this isolated workspace.
-        - Keep the implementation within the preferred scope unless the task clearly requires more.
-        - If scope must expand, do the minimum necessary and explain why.
-        - Do not create commits, branches, or tags.
-        - Run targeted verification if it is cheap and local.
+        - Focus on the plan, not the code.
+        - Keep the proposed implementation within the preferred scope unless the task clearly requires more.
+        - If scope must expand, explain the minimum necessary expansion.
+        - Give concrete execution steps instead of vague advice.
         - When you finish, return JSON that matches the schema exactly.
         """
     ).strip()
 
 
-def build_review_prompt(
+def build_plan_review_prompt(
     reviewer: str,
     peer: str,
     task: str,
     acceptance: list[str],
     scope: list[str],
-    peer_package: Path,
-    peer_summary: dict[str, Any],
+    peer_plan: dict[str, Any],
 ) -> str:
     return textwrap.dedent(
         f"""
-        You are {reviewer} reviewing {peer}'s independent solution in a dual-agent peer consensus protocol.
+        You are {reviewer} reviewing {peer}'s implementation plan in a dual-agent peer consensus protocol.
 
         Review only. Do not modify your workspace.
 
         {prompt_header(task, acceptance, scope)}
 
-        Peer artifacts:
-        - Diff: {peer_package / "solution.diff"}
-        - Manifest: {peer_package / "manifest.json"}
-        - Changed file copies root: {peer_package / "files"}
-
-        Peer summary:
-        {json.dumps(peer_summary, indent=2, ensure_ascii=True)}
+        Peer plan:
+        {json.dumps(peer_plan, indent=2, ensure_ascii=True)}
 
         Review standard:
+        - correctness of the proposed plan
+        - missing steps
+        - hidden risks
+        - unrealistic scope
+        - weak verification strategy
+
+        Return JSON that matches the schema exactly.
+        """
+    ).strip()
+
+
+def build_plan_revision_prompt(
+    agent: str,
+    peer: str,
+    task: str,
+    acceptance: list[str],
+    scope: list[str],
+    peer_review: dict[str, Any],
+) -> str:
+    return textwrap.dedent(
+        f"""
+        You are {agent} revising your own implementation plan after reading {peer}'s review.
+
+        This is still a plan-only phase. Do not modify code. Do not create commits, branches, or tags.
+
+        {prompt_header(task, acceptance, scope)}
+
+        Peer review of your work:
+        {json.dumps(peer_review, indent=2, ensure_ascii=True)}
+
+        Revision rules:
+        - Fix valid issues.
+        - Keep the plan concrete and executable.
+        - Keep useful strengths from your original plan.
+        - Return JSON that matches the schema exactly.
+        """
+    ).strip()
+
+
+def build_plan_consensus_prompt(
+    agent: str,
+    peer: str,
+    task: str,
+    acceptance: list[str],
+    scope: list[str],
+    own_revision: dict[str, Any],
+    peer_revision: dict[str, Any],
+) -> str:
+    return textwrap.dedent(
+        f"""
+        You are {agent} deciding which revised implementation plan should become the final plan base.
+
+        Do not modify your workspace.
+
+        {prompt_header(task, acceptance, scope)}
+
+        Your revised summary:
+        {json.dumps(own_revision, indent=2, ensure_ascii=True)}
+
+        Peer revised plan:
+        {json.dumps(peer_revision, indent=2, ensure_ascii=True)}
+
+        Decide:
+        - which revised plan is the better final base
+        - what must be preserved from your own plan
+        - what must be preserved from the peer plan
+        - what blockers remain against either plan
+
+        Return JSON that matches the schema exactly.
+        """
+    ).strip()
+
+
+def build_final_plan_prompt(
+    base_agent: str,
+    peer: str,
+    task: str,
+    acceptance: list[str],
+    scope: list[str],
+    merge_brief: dict[str, Any],
+    own_revision: dict[str, Any],
+    peer_revision: dict[str, Any],
+) -> str:
+    return textwrap.dedent(
+        f"""
+        You are {base_agent}. Your revised plan is the starting point for the final implementation plan.
+
+        This is still a plan-only phase. Do not modify code. Produce the final agreed implementation plan.
+
+        {prompt_header(task, acceptance, scope)}
+
+        Your revised summary:
+        {json.dumps(own_revision, indent=2, ensure_ascii=True)}
+
+        Peer revised plan:
+        {json.dumps(peer_revision, indent=2, ensure_ascii=True)}
+
+        Merge brief:
+        {json.dumps(merge_brief, indent=2, ensure_ascii=True)}
+
+        Final plan rules:
+        - Preserve valid strengths from both sides.
+        - Resolve blockers inside the plan when possible.
+        - Keep the plan concrete, internally consistent, and directly executable.
+        - Return JSON that matches the schema exactly.
+        """
+    ).strip()
+
+
+def build_execute_prompt(
+    agent: str,
+    task: str,
+    acceptance: list[str],
+    scope: list[str],
+    final_plan: dict[str, Any],
+) -> str:
+    return textwrap.dedent(
+        f"""
+        You are {agent} executing the agreed final plan.
+
+        This is the code-writing phase. Modify code only inside this isolated workspace.
+        Do not create commits, branches, or tags.
+
+        {prompt_header(task, acceptance, scope)}
+
+        Final plan:
+        {json.dumps(final_plan, indent=2, ensure_ascii=True)}
+
+        Execution rules:
+        - Follow the final plan closely.
+        - Keep changes minimal and coherent.
+        - If reality differs from the plan, adapt pragmatically and explain why.
+        - Run targeted verification if it is cheap and local.
+
+        Return JSON that matches the schema exactly.
+        """
+    ).strip()
+
+
+def build_execution_review_prompt(
+    reviewer: str,
+    executor: str,
+    task: str,
+    acceptance: list[str],
+    scope: list[str],
+    final_plan: dict[str, Any],
+    execution_summary: dict[str, Any],
+    execution_package: Path,
+) -> str:
+    return textwrap.dedent(
+        f"""
+        You are {reviewer} reviewing {executor}'s implementation against the agreed final plan.
+
+        Review only. Do not modify your workspace.
+
+        {prompt_header(task, acceptance, scope)}
+
+        Final plan:
+        {json.dumps(final_plan, indent=2, ensure_ascii=True)}
+
+        Execution summary:
+        {json.dumps(execution_summary, indent=2, ensure_ascii=True)}
+
+        Implementation artifacts:
+        - Diff: {execution_package / "solution.diff"}
+        - Manifest: {execution_package / "manifest.json"}
+        - Changed file copies root: {execution_package / "files"}
+
+        Review standard:
+        - adherence to the final plan
         - correctness
-        - edge cases
         - regressions
-        - maintainability
+        - edge cases
         - missing tests
 
         Return JSON that matches the schema exactly.
@@ -647,176 +845,33 @@ def build_review_prompt(
     ).strip()
 
 
-def build_revision_prompt(
+def build_execution_fix_prompt(
     agent: str,
-    peer: str,
     task: str,
     acceptance: list[str],
     scope: list[str],
-    peer_package: Path,
-    peer_review: dict[str, Any],
+    final_plan: dict[str, Any],
+    review_feedback: dict[str, Any],
 ) -> str:
     return textwrap.dedent(
         f"""
-        You are {agent} revising your own solution after reading {peer}'s review.
+        You are {agent} updating the implementation after peer review.
 
-        Your current implementation is already in this workspace.
-        You may inspect the peer artifacts for ideas, but you should not abandon valid strengths from your own solution.
-
-        {prompt_header(task, acceptance, scope)}
-
-        Peer artifacts:
-        - Diff: {peer_package / "solution.diff"}
-        - Manifest: {peer_package / "manifest.json"}
-        - Changed file copies root: {peer_package / "files"}
-
-        Peer review of your work:
-        {json.dumps(peer_review, indent=2, ensure_ascii=True)}
-
-        Revision rules:
-        - Fix valid issues.
-        - Adopt peer strengths when they improve the solution.
-        - Keep the implementation coherent instead of bolting features together.
-        - Do not create commits, branches, or tags.
-        - Return JSON that matches the schema exactly.
-        """
-    ).strip()
-
-
-def build_consensus_prompt(
-    agent: str,
-    peer: str,
-    task: str,
-    acceptance: list[str],
-    scope: list[str],
-    own_revision: dict[str, Any],
-    peer_revision: dict[str, Any],
-    peer_package: Path,
-) -> str:
-    return textwrap.dedent(
-        f"""
-        You are {agent} deciding whether the two revised solutions are ready to converge on a final answer.
-
-        Do not modify your workspace.
+        This is still the execution phase. Modify code only inside this isolated workspace.
+        Do not create commits, branches, or tags.
 
         {prompt_header(task, acceptance, scope)}
 
-        Your revised summary:
-        {json.dumps(own_revision, indent=2, ensure_ascii=True)}
+        Final plan:
+        {json.dumps(final_plan, indent=2, ensure_ascii=True)}
 
-        Peer revised artifacts:
-        - Diff: {peer_package / "solution.diff"}
-        - Manifest: {peer_package / "manifest.json"}
-        - Changed file copies root: {peer_package / "files"}
-        - Summary:
-        {json.dumps(peer_revision, indent=2, ensure_ascii=True)}
+        Review feedback:
+        {json.dumps(review_feedback, indent=2, ensure_ascii=True)}
 
-        Decide:
-        - which solution is the better final base
-        - what must be preserved from your own work
-        - what must be preserved from the peer work
-        - what blockers remain against either candidate
-
-        Return JSON that matches the schema exactly.
-        """
-    ).strip()
-
-
-def build_final_merge_prompt(
-    base_agent: str,
-    peer: str,
-    task: str,
-    acceptance: list[str],
-    scope: list[str],
-    merge_brief: dict[str, Any],
-    peer_package: Path,
-    own_revision: dict[str, Any],
-    peer_revision: dict[str, Any],
-) -> str:
-    return textwrap.dedent(
-        f"""
-        You are {base_agent}. Your revised implementation is the starting point for the final merge candidate.
-
-        Modify this workspace to produce the final consensus candidate.
-
-        {prompt_header(task, acceptance, scope)}
-
-        Your revised summary:
-        {json.dumps(own_revision, indent=2, ensure_ascii=True)}
-
-        Peer revised artifacts:
-        - Diff: {peer_package / "solution.diff"}
-        - Manifest: {peer_package / "manifest.json"}
-        - Changed file copies root: {peer_package / "files"}
-        - Summary:
-        {json.dumps(peer_revision, indent=2, ensure_ascii=True)}
-
-        Merge brief:
-        {json.dumps(merge_brief, indent=2, ensure_ascii=True)}
-
-        Final candidate rules:
-        - Preserve valid strengths from both sides.
-        - Resolve blocking objections, not just restate them.
-        - Keep the final implementation internally consistent.
-        - Do not create commits, branches, or tags.
-        - Return JSON that matches the schema exactly.
-        """
-    ).strip()
-
-
-def build_signoff_prompt(
-    agent: str,
-    final_owner: str,
-    task: str,
-    acceptance: list[str],
-    scope: list[str],
-    final_summary: dict[str, Any],
-    final_package: Path,
-) -> str:
-    return textwrap.dedent(
-        f"""
-        You are {agent} signing off on the final candidate produced in {final_owner}'s isolated workspace.
-
-        Do not modify your workspace.
-
-        {prompt_header(task, acceptance, scope)}
-
-        Final candidate artifacts:
-        - Diff: {final_package / "solution.diff"}
-        - Manifest: {final_package / "manifest.json"}
-        - Changed file copies root: {final_package / "files"}
-        - Summary:
-        {json.dumps(final_summary, indent=2, ensure_ascii=True)}
-
-        Approve only if you would ship this as the final answer.
-        If you reject it, return only concrete blocking objections.
-
-        Return JSON that matches the schema exactly.
-        """
-    ).strip()
-
-
-def build_objection_fix_prompt(
-    base_agent: str,
-    task: str,
-    acceptance: list[str],
-    scope: list[str],
-    final_summary: dict[str, Any],
-    signoffs: dict[str, dict[str, Any]],
-) -> str:
-    return textwrap.dedent(
-        f"""
-        You are {base_agent}. The current final candidate needs another pass before sign-off.
-
-        Modify this workspace to address the blocking objections below while preserving already-approved strengths.
-
-        {prompt_header(task, acceptance, scope)}
-
-        Current final summary:
-        {json.dumps(final_summary, indent=2, ensure_ascii=True)}
-
-        Sign-off feedback:
-        {json.dumps(signoffs, indent=2, ensure_ascii=True)}
+        Fix rules:
+        - Address valid review findings.
+        - Keep the implementation aligned with the final plan.
+        - Keep the diff focused.
 
         Return JSON that matches the schema exactly.
         """
@@ -1109,7 +1164,9 @@ def markdown_report(data: dict[str, Any]) -> str:
         "",
         f"- Repo: `{data['repo']}`",
         f"- Task: {data['task'].strip()}",
-        f"- Final base: `{data['final_base']}`",
+        f"- Final plan base: `{data['final_plan_base']}`",
+        f"- Executor: `{data['executor']}`",
+        f"- Reviewer: `{data['reviewer']}`",
         f"- Final approved: `{data['final_approved']}`",
         "",
         "## Final Changed Files",
@@ -1122,12 +1179,13 @@ def markdown_report(data: dict[str, Any]) -> str:
     lines.extend(
         [
             "",
-            "## Sign-off",
-            f"- Claude approved: `{data['signoff']['claude']['approved']}`",
-            f"- Codex approved: `{data['signoff']['codex']['approved']}`",
+            "## Implementation Review",
+            f"- Verdict: `{data['implementation_review']['overall_verdict']}`",
+            f"- Summary: {data['implementation_review']['summary']}",
             "",
             "## Artifacts",
             f"- Run dir: `{data['run_dir']}`",
+            f"- Final plan file: `{data['final_plan_file']}`",
             f"- Final package: `{data['final_package']}`",
         ]
     )
@@ -1175,24 +1233,24 @@ def main() -> int:
             claude_kwargs={
                 **common_stage_kwargs,
                 "agent": "claude",
-                "phase": "initial",
+                "phase": "plan-initial",
                 "workspace": workspaces.claude,
                 "shared_dirs": [run_dir],
-                "prompt": build_initial_prompt("Claude Code", task, args.acceptance, args.scope),
-                "schema": SOLUTION_SCHEMA,
-                "stage_dir": run_dir / "stages" / "initial" / "claude",
-                "read_only": False,
+                "prompt": build_plan_prompt("Claude Code", task, args.acceptance, args.scope),
+                "schema": PLAN_SCHEMA,
+                "stage_dir": run_dir / "stages" / "plan-initial" / "claude",
+                "read_only": True,
             },
             codex_kwargs={
                 **common_stage_kwargs,
                 "agent": "codex",
-                "phase": "initial",
+                "phase": "plan-initial",
                 "workspace": workspaces.codex,
                 "shared_dirs": [run_dir],
-                "prompt": build_initial_prompt("Codex", task, args.acceptance, args.scope),
-                "schema": SOLUTION_SCHEMA,
-                "stage_dir": run_dir / "stages" / "initial" / "codex",
-                "read_only": False,
+                "prompt": build_plan_prompt("Codex", task, args.acceptance, args.scope),
+                "schema": PLAN_SCHEMA,
+                "stage_dir": run_dir / "stages" / "plan-initial" / "codex",
+                "read_only": True,
             },
         )
 
@@ -1200,39 +1258,37 @@ def main() -> int:
             claude_kwargs={
                 **common_stage_kwargs,
                 "agent": "claude",
-                "phase": "review-peer-initial",
+                "phase": "plan-review",
                 "workspace": workspaces.claude,
-                "shared_dirs": [run_dir, initial_codex.package_dir],
-                "prompt": build_review_prompt(
+                "shared_dirs": [run_dir],
+                "prompt": build_plan_review_prompt(
                     "Claude Code",
                     "Codex",
                     task,
                     args.acceptance,
                     args.scope,
-                    initial_codex.package_dir,
                     initial_codex.parsed,
                 ),
                 "schema": REVIEW_SCHEMA,
-                "stage_dir": run_dir / "stages" / "reviews" / "claude-on-codex",
+                "stage_dir": run_dir / "stages" / "plan-review" / "claude-on-codex",
                 "read_only": True,
             },
             codex_kwargs={
                 **common_stage_kwargs,
                 "agent": "codex",
-                "phase": "review-peer-initial",
+                "phase": "plan-review",
                 "workspace": workspaces.codex,
-                "shared_dirs": [run_dir, initial_claude.package_dir],
-                "prompt": build_review_prompt(
+                "shared_dirs": [run_dir],
+                "prompt": build_plan_review_prompt(
                     "Codex",
                     "Claude Code",
                     task,
                     args.acceptance,
                     args.scope,
-                    initial_claude.package_dir,
                     initial_claude.parsed,
                 ),
                 "schema": REVIEW_SCHEMA,
-                "stage_dir": run_dir / "stages" / "reviews" / "codex-on-claude",
+                "stage_dir": run_dir / "stages" / "plan-review" / "codex-on-claude",
                 "read_only": True,
             },
         )
@@ -1241,40 +1297,38 @@ def main() -> int:
             claude_kwargs={
                 **common_stage_kwargs,
                 "agent": "claude",
-                "phase": "revise",
+                "phase": "plan-revise",
                 "workspace": workspaces.claude,
-                "shared_dirs": [run_dir, initial_codex.package_dir, review_codex.package_dir],
-                "prompt": build_revision_prompt(
+                "shared_dirs": [run_dir],
+                "prompt": build_plan_revision_prompt(
                     "Claude Code",
                     "Codex",
                     task,
                     args.acceptance,
                     args.scope,
-                    initial_codex.package_dir,
                     review_codex.parsed,
                 ),
-                "schema": REVISION_SCHEMA,
-                "stage_dir": run_dir / "stages" / "revisions" / "claude",
-                "read_only": False,
+                "schema": PLAN_REVISION_SCHEMA,
+                "stage_dir": run_dir / "stages" / "plan-revision" / "claude",
+                "read_only": True,
             },
             codex_kwargs={
                 **common_stage_kwargs,
                 "agent": "codex",
-                "phase": "revise",
+                "phase": "plan-revise",
                 "workspace": workspaces.codex,
-                "shared_dirs": [run_dir, initial_claude.package_dir, review_claude.package_dir],
-                "prompt": build_revision_prompt(
+                "shared_dirs": [run_dir],
+                "prompt": build_plan_revision_prompt(
                     "Codex",
                     "Claude Code",
                     task,
                     args.acceptance,
                     args.scope,
-                    initial_claude.package_dir,
                     review_claude.parsed,
                 ),
-                "schema": REVISION_SCHEMA,
-                "stage_dir": run_dir / "stages" / "revisions" / "codex",
-                "read_only": False,
+                "schema": PLAN_REVISION_SCHEMA,
+                "stage_dir": run_dir / "stages" / "plan-revision" / "codex",
+                "read_only": True,
             },
         )
 
@@ -1282,10 +1336,10 @@ def main() -> int:
             claude_kwargs={
                 **common_stage_kwargs,
                 "agent": "claude",
-                "phase": "consensus",
+                "phase": "plan-consensus",
                 "workspace": workspaces.claude,
-                "shared_dirs": [run_dir, revised_codex.package_dir],
-                "prompt": build_consensus_prompt(
+                "shared_dirs": [run_dir],
+                "prompt": build_plan_consensus_prompt(
                     "Claude Code",
                     "Codex",
                     task,
@@ -1293,19 +1347,18 @@ def main() -> int:
                     args.scope,
                     revised_claude.parsed,
                     revised_codex.parsed,
-                    revised_codex.package_dir,
                 ),
                 "schema": CONSENSUS_SCHEMA,
-                "stage_dir": run_dir / "stages" / "consensus" / "claude",
+                "stage_dir": run_dir / "stages" / "plan-consensus" / "claude",
                 "read_only": True,
             },
             codex_kwargs={
                 **common_stage_kwargs,
                 "agent": "codex",
-                "phase": "consensus",
+                "phase": "plan-consensus",
                 "workspace": workspaces.codex,
-                "shared_dirs": [run_dir, revised_claude.package_dir],
-                "prompt": build_consensus_prompt(
+                "shared_dirs": [run_dir],
+                "prompt": build_plan_consensus_prompt(
                     "Codex",
                     "Claude Code",
                     task,
@@ -1313,143 +1366,142 @@ def main() -> int:
                     args.scope,
                     revised_codex.parsed,
                     revised_claude.parsed,
-                    revised_claude.package_dir,
                 ),
                 "schema": CONSENSUS_SCHEMA,
-                "stage_dir": run_dir / "stages" / "consensus" / "codex",
+                "stage_dir": run_dir / "stages" / "plan-consensus" / "codex",
                 "read_only": True,
             },
         )
 
-        final_base = choose_final_base(consensus_claude.parsed, consensus_codex.parsed)
-        merge_brief = build_merge_brief(final_base, consensus_claude.parsed, consensus_codex.parsed)
-        write_json(run_dir / "merge-brief.json", merge_brief)
+        final_plan_base = choose_final_base(consensus_claude.parsed, consensus_codex.parsed)
+        merge_brief = build_merge_brief(final_plan_base, consensus_claude.parsed, consensus_codex.parsed)
+        write_json(run_dir / "plan-merge-brief.json", merge_brief)
 
-        if final_base == "claude":
+        if final_plan_base == "claude":
             base_workspace = workspaces.claude
+            reviewer_workspace = workspaces.codex
             base_revision = revised_claude
             peer_revision = revised_codex
             peer_agent_name = "Codex"
+            executor_name = "Claude Code"
+            reviewer_name = "Codex"
         else:
             base_workspace = workspaces.codex
+            reviewer_workspace = workspaces.claude
             base_revision = revised_codex
             peer_revision = revised_claude
             peer_agent_name = "Claude Code"
+            executor_name = "Codex"
+            reviewer_name = "Claude Code"
 
-        final_candidate = run_agent_stage(
+        final_plan = run_agent_stage(
             **common_stage_kwargs,
-            agent=final_base,
-            phase="final-merge",
+            agent=final_plan_base,
+            phase="plan-finalize",
             workspace=base_workspace,
-            shared_dirs=[run_dir, peer_revision.package_dir],
-            prompt=build_final_merge_prompt(
-                "Claude Code" if final_base == "claude" else "Codex",
+            shared_dirs=[run_dir],
+            prompt=build_final_plan_prompt(
+                executor_name,
                 peer_agent_name,
                 task,
                 args.acceptance,
                 args.scope,
                 merge_brief,
-                peer_revision.package_dir,
                 base_revision.parsed,
                 peer_revision.parsed,
             ),
-            schema=REVISION_SCHEMA,
-            stage_dir=run_dir / "stages" / "final-candidate" / final_base,
+            schema=FINAL_PLAN_SCHEMA,
+            stage_dir=run_dir / "stages" / "plan-final" / final_plan_base,
+            read_only=True,
+        )
+        final_plan_file = run_dir / "final-plan.json"
+        write_json(final_plan_file, final_plan.parsed)
+
+        current_execution = run_agent_stage(
+            **common_stage_kwargs,
+            agent=final_plan_base,
+            phase="execute-initial",
+            workspace=base_workspace,
+            shared_dirs=[run_dir],
+            prompt=build_execute_prompt(
+                executor_name,
+                task,
+                args.acceptance,
+                args.scope,
+                final_plan.parsed,
+            ),
+            schema=EXECUTION_SCHEMA,
+            stage_dir=run_dir / "stages" / "execute" / final_plan_base / "round-0",
             read_only=False,
         )
 
-        current_final = final_candidate
-        signoff_results: dict[str, StageRun] = {}
+        implementation_review: StageRun | None = None
         final_approved = False
 
         for round_idx in range(args.signoff_rounds + 1):
-            signoff_claude, signoff_codex = run_parallel_stage_pair(
-                claude_kwargs={
-                    **common_stage_kwargs,
-                    "agent": "claude",
-                    "phase": f"signoff-round-{round_idx}",
-                    "workspace": workspaces.claude,
-                    "shared_dirs": [run_dir, current_final.package_dir],
-                    "prompt": build_signoff_prompt(
-                        "Claude Code",
-                        "Claude Code" if final_base == "claude" else "Codex",
-                        task,
-                        args.acceptance,
-                        args.scope,
-                        current_final.parsed,
-                        current_final.package_dir,
-                    ),
-                    "schema": SIGNOFF_SCHEMA,
-                    "stage_dir": run_dir / "stages" / "signoff" / f"round-{round_idx}" / "claude",
-                    "read_only": True,
-                },
-                codex_kwargs={
-                    **common_stage_kwargs,
-                    "agent": "codex",
-                    "phase": f"signoff-round-{round_idx}",
-                    "workspace": workspaces.codex,
-                    "shared_dirs": [run_dir, current_final.package_dir],
-                    "prompt": build_signoff_prompt(
-                        "Codex",
-                        "Claude Code" if final_base == "claude" else "Codex",
-                        task,
-                        args.acceptance,
-                        args.scope,
-                        current_final.parsed,
-                        current_final.package_dir,
-                    ),
-                    "schema": SIGNOFF_SCHEMA,
-                    "stage_dir": run_dir / "stages" / "signoff" / f"round-{round_idx}" / "codex",
-                    "read_only": True,
-                },
+            implementation_review = run_agent_stage(
+                **common_stage_kwargs,
+                agent="codex" if final_plan_base == "claude" else "claude",
+                phase=f"implementation-review-{round_idx}",
+                workspace=reviewer_workspace,
+                shared_dirs=[run_dir, current_execution.package_dir],
+                prompt=build_execution_review_prompt(
+                    reviewer_name,
+                    executor_name,
+                    task,
+                    args.acceptance,
+                    args.scope,
+                    final_plan.parsed,
+                    current_execution.parsed,
+                    current_execution.package_dir,
+                ),
+                schema=REVIEW_SCHEMA,
+                stage_dir=run_dir / "stages" / "implementation-review" / f"round-{round_idx}" / reviewer_name.lower().replace(" ", "-"),
+                read_only=True,
             )
-            signoff_results = {"claude": signoff_claude, "codex": signoff_codex}
 
-            if signoff_results["claude"].parsed.get("approved") and signoff_results["codex"].parsed.get("approved"):
+            if implementation_review.parsed.get("overall_verdict") == "approve":
                 final_approved = True
                 break
 
             if round_idx >= args.signoff_rounds:
                 break
 
-            current_final = run_agent_stage(
+            current_execution = run_agent_stage(
                 **common_stage_kwargs,
-                agent=final_base,
-                phase=f"final-fix-round-{round_idx + 1}",
+                agent=final_plan_base,
+                phase=f"execute-fix-{round_idx + 1}",
                 workspace=base_workspace,
-                shared_dirs=[run_dir, current_final.package_dir],
-                prompt=build_objection_fix_prompt(
-                    "Claude Code" if final_base == "claude" else "Codex",
+                shared_dirs=[run_dir, current_execution.package_dir],
+                prompt=build_execution_fix_prompt(
+                    executor_name,
                     task,
                     args.acceptance,
                     args.scope,
-                    current_final.parsed,
-                    {
-                        "claude": signoff_results["claude"].parsed,
-                        "codex": signoff_results["codex"].parsed,
-                    },
+                    final_plan.parsed,
+                    implementation_review.parsed,
                 ),
-                schema=REVISION_SCHEMA,
-                stage_dir=run_dir / "stages" / "final-fixes" / f"round-{round_idx + 1}" / final_base,
+                schema=EXECUTION_SCHEMA,
+                stage_dir=run_dir / "stages" / "execute-fix" / final_plan_base / f"round-{round_idx + 1}",
                 read_only=False,
             )
 
         if args.apply_final and final_approved:
-            apply_final_to_source(repo, current_final.workspace, current_final.changed_files)
+            apply_final_to_source(repo, current_execution.workspace, current_execution.changed_files)
 
         final_report = {
             "run_id": run_id,
             "repo": str(repo),
             "task": task,
             "run_dir": str(run_dir),
-            "final_base": final_base,
+            "final_plan_base": final_plan_base,
+            "executor": final_plan_base,
+            "reviewer": "codex" if final_plan_base == "claude" else "claude",
             "final_approved": final_approved,
-            "final_package": str(current_final.package_dir),
-            "final_changed_files": current_final.changed_files,
-            "signoff": {
-                "claude": signoff_results["claude"].parsed,
-                "codex": signoff_results["codex"].parsed,
-            },
+            "final_plan_file": str(final_plan_file),
+            "final_package": str(current_execution.package_dir),
+            "final_changed_files": current_execution.changed_files,
+            "implementation_review": implementation_review.parsed if implementation_review else {},
         }
         write_json(run_dir / "report.json", final_report)
         write_text(run_dir / "report.md", markdown_report(final_report))

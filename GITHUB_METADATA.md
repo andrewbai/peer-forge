@@ -6,7 +6,7 @@ Suggested repository name:
 
 Suggested description:
 
-- `Dual-agent coding workflow for independent solutions, cross-review, and consensus merge.`
+- `Dual-agent coding workflow for plan consensus first, then single-agent execution and peer review.`
 
 Alternative product-style tagline:
 
@@ -31,7 +31,7 @@ Suggested short pitch:
 
 Release tag:
 
-- `v0.1.0`
+- `v0.2.0`
 
 Notes:
 
