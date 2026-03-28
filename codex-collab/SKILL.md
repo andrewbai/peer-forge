@@ -62,7 +62,7 @@ codex exec --help >/dev/null
 Plan:
 
 ```bash
-~/.claude/skills/codex-collab/scripts/codex-headless-collab.sh \
+~/.claude/skills/peer-forge/codex-collab/scripts/codex-headless-collab.sh \
   --mode plan \
   --file path/to/file.ts \
   -- "Add retry logic without changing the public API. Call out edge cases and tests."
@@ -71,7 +71,7 @@ Plan:
 Apply:
 
 ```bash
-~/.claude/skills/codex-collab/scripts/codex-headless-collab.sh \
+~/.claude/skills/peer-forge/codex-collab/scripts/codex-headless-collab.sh \
   --mode apply \
   --file path/to/file.ts \
   -- "Implement the agreed retry logic in this file only. Keep the diff minimal."
@@ -80,13 +80,13 @@ Apply:
 Review:
 
 ```bash
-~/.claude/skills/codex-collab/scripts/codex-headless-collab.sh \
+~/.claude/skills/peer-forge/codex-collab/scripts/codex-headless-collab.sh \
   --mode review \
   --file path/to/file.ts \
   -- "Review the current state of this file for correctness, regressions, and missing tests."
 ```
 
-If the current project vendors this toolkit locally, replace `~/.claude/skills/` with `./.claude/skills/`.
+If the current project vendors this toolkit locally, replace `~/.claude/skills/peer-forge` with `./.claude/skills/peer-forge`.
 
 ## Prompt Contract For Codex
 

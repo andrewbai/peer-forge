@@ -4,6 +4,8 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_NAME="$(basename "$REPO_ROOT")"
 LOCAL_INSTALL=0
+FORCE=0
+SKILL_EXCLUDES=(tools bin docs test scripts node_modules)
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -11,11 +13,16 @@ while [[ $# -gt 0 ]]; do
       LOCAL_INSTALL=1
       shift
       ;;
+    --force)
+      FORCE=1
+      shift
+      ;;
     -h|--help)
       cat <<EOF
 Usage:
   $ROOT_NAME/uninstall
   $ROOT_NAME/uninstall --local
+  $ROOT_NAME/uninstall --force
 EOF
       exit 0
       ;;
@@ -33,6 +40,17 @@ if [[ "$(basename "$SKILLS_DIR")" != "skills" || "$(basename "$(dirname "$SKILLS
   exit 1
 fi
 
+is_excluded_skill_dir() {
+  local skill_name="$1"
+  local item
+  for item in "${SKILL_EXCLUDES[@]}"; do
+    if [[ "$skill_name" == "$item" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 remove_link() {
   local path="$1"
   local expected="$2"
@@ -47,9 +65,20 @@ remove_link() {
   fi
 }
 
+if [[ "$FORCE" -eq 0 ]]; then
+  echo "This will delete $REPO_ROOT and remove all peer-forge skill links."
+  printf "Continue? [y/N] "
+  read -r confirm || confirm=""
+  if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+    echo "Aborted."
+    exit 0
+  fi
+fi
+
 for skill_dir in "$REPO_ROOT"/*/; do
-  [[ -f "$skill_dir/SKILL.md" ]] || continue
   skill_name="$(basename "$skill_dir")"
+  is_excluded_skill_dir "$skill_name" && continue
+  [[ -f "$skill_dir/SKILL.md" ]] || continue
   remove_link "$SKILLS_DIR/$skill_name" "$ROOT_NAME/$skill_name"
 done
 

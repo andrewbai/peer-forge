@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.5.1 - 2026-03-28
+
+Path consistency and safer install tooling.
+
+- Updated `codex-collab` docs to reference the helper script through `~/.claude/skills/peer-forge/` like the other skills.
+- Added exclusion guards to `setup` and `uninstall` so unexpected directories such as `docs/` or `test/` are not treated as installable skills.
+- Added an `uninstall --force` escape hatch and a default confirmation prompt before deleting the installed repo.
+
 ## v0.5.0 - 2026-03-28
 
 Root-skill repo layout and gstack-style installation flow.
