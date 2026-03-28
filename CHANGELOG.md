@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+Nothing yet.
+
+## v0.14.0 - 2026-03-29
+
 Conflict-aware live apply.
 
 - Changed `peer-forge-live apply` from whole-repo dirty/drift blocking to path-level overlap analysis.
