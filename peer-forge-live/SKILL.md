@@ -83,6 +83,13 @@ If the user wants the tmux session created without auto-attach:
   --no-attach
 ```
 
+If the user already has a `state.json` and wants to re-attach or repair the supervisor pane:
+
+```bash
+~/.claude/skills/peer-forge/bin/peer-forge-live resume \
+  --state-file /path/to/state.json
+```
+
 Important startup behavior:
 
 - Do not promise a fully unattended start.
@@ -99,6 +106,10 @@ Inside the supervisor pane:
 - `tail codex`
 - `inspect claude`
 - `inspect codex`
+- `show final-plan`
+- `show package`
+- `show diff`
+- `show manifest`
 - `note both`
 - `wait`
 - `continue`
@@ -108,6 +119,7 @@ Rules:
 - `note both` is symmetric only.
 - Notes are queued into the next turn for both agents equally.
 - `continue` is used at phase boundaries after both sides finish a turn.
+- `status` also shows executor/reviewer, plan/execution approval state, read-only violations, current package summary, and each pane's current mode.
 
 ## When To Prefer `peer-consensus`
 

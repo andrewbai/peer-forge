@@ -156,5 +156,29 @@ def capture_pane(pane_id: str, *, lines: int = 200) -> str:
     return proc.stdout
 
 
+def list_panes(target: str) -> list[dict[str, str]]:
+    proc = run_tmux(
+        [
+            "list-panes",
+            "-t",
+            target,
+            "-F",
+            "#{pane_id}\t#{pane_title}\t#{pane_dead}\t#{pane_current_command}",
+        ]
+    )
+    panes: list[dict[str, str]] = []
+    for line in proc.stdout.splitlines():
+        pane_id, pane_title, pane_dead, pane_current_command = (line.split("\t", 3) + ["", "", "", ""])[:4]
+        panes.append(
+            {
+                "pane_id": pane_id,
+                "pane_title": pane_title,
+                "pane_dead": pane_dead,
+                "pane_current_command": pane_current_command,
+            }
+        )
+    return panes
+
+
 def attach_session(session_name: str) -> None:
     os.execvp("tmux", ["tmux", "attach-session", "-t", session_name])

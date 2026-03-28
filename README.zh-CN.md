@@ -46,6 +46,8 @@ peer-forge/
 │   ├── peer-consensus
 │   ├── peer-forge-live
 │   └── peer-forge-upgrade
+├── scripts/
+│   └── live-smoke.sh
 ├── setup
 ├── uninstall
 ├── README.md
@@ -137,6 +139,13 @@ live tmux 模式：
   --task "让 Claude Code 和 Codex 独立出方案、互相 review，并且我在旁边实时监督。"
 ```
 
+恢复或重新附着已有的 live run：
+
+```bash
+~/.claude/skills/peer-forge/bin/peer-forge-live resume \
+  --state-file /path/to/state.json
+```
+
 ## 环境要求
 
 - 已安装并登录 `claude` CLI
@@ -219,10 +228,23 @@ supervisor pane 里的主要命令：
 - `tail codex`
 - `inspect claude`
 - `inspect codex`
+- `show final-plan`
+- `show package`
+- `show diff`
+- `show manifest`
 - `note both`
 - `wait`
 - `continue`
 - `abort`
+
+`status` 现在还会显示当前 executor/reviewer、plan/execution 是否已批准、只读违规次数、当前 package 摘要，以及每个 pane 当前是 `read-only` 还是 `write`。
+
+如果 supervisor pane 挂掉了，或者你 detach 之后想原地修复会话：
+
+```bash
+~/.claude/skills/peer-forge/bin/peer-forge-live resume \
+  --state-file <target-repo>/.claude/tmp/peer-forge-live/<run-id>/state.json
+```
 
 每次 live run 的产物会写到：
 
@@ -233,13 +255,19 @@ supervisor pane 里的主要命令：
 里面包括：
 
 - `state.json`
+- `events.jsonl`
 - `supervisor.log`
 - `panes/verbose.log`
 - `panes/claude.raw.log`
 - `panes/codex.raw.log`
+- `panes/supervisor.raw.log`
 - `turns/<turn-id>/...`
 - `report.json`
 - `report.md`
+
+另外，仓库里还带了一个用于验证 live 启动和 supervisor 恢复链路的 smoke 脚本：
+
+- `scripts/live-smoke.sh`
 
 ## 运行产物
 

@@ -43,6 +43,8 @@ peer-forge/
 │   ├── peer-consensus
 │   ├── peer-forge-live
 │   └── peer-forge-upgrade
+├── scripts/
+│   └── live-smoke.sh
 ├── setup
 ├── uninstall
 ├── README.md
@@ -134,6 +136,13 @@ Live tmux mode:
   --task "Have Claude Code and Codex draft plans independently, cross-review, and converge while I supervise live."
 ```
 
+Resume or re-attach to an existing live run:
+
+```bash
+~/.claude/skills/peer-forge/bin/peer-forge-live resume \
+  --state-file /path/to/state.json
+```
+
 ## Requirements
 
 - `claude` CLI installed and logged in
@@ -213,10 +222,23 @@ Inside the supervisor pane, the main commands are:
 - `tail codex`
 - `inspect claude`
 - `inspect codex`
+- `show final-plan`
+- `show package`
+- `show diff`
+- `show manifest`
 - `note both`
 - `wait`
 - `continue`
 - `abort`
+
+`status` now also surfaces the selected executor/reviewer, plan/execution approval state, read-only violations, current package summary, and each pane's current mode.
+
+If the supervisor pane dies or you detach and want to repair the session in place:
+
+```bash
+~/.claude/skills/peer-forge/bin/peer-forge-live resume \
+  --state-file <target-repo>/.claude/tmp/peer-forge-live/<run-id>/state.json
+```
 
 Each live run writes artifacts under:
 
@@ -227,13 +249,19 @@ Each live run writes artifacts under:
 That includes:
 
 - `state.json`
+- `events.jsonl`
 - `supervisor.log`
 - `panes/verbose.log`
 - `panes/claude.raw.log`
 - `panes/codex.raw.log`
+- `panes/supervisor.raw.log`
 - `turns/<turn-id>/...`
 - `report.json`
 - `report.md`
+
+Manual smoke coverage for live startup and supervisor recovery is included in:
+
+- `scripts/live-smoke.sh`
 
 ## Artifacts
 

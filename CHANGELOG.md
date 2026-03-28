@@ -2,7 +2,13 @@
 
 ## Unreleased
 
-Nothing yet.
+Live supervisor recovery and richer inspection.
+
+- Added `peer-forge-live resume --state-file ...` so an existing tmux run can re-attach cleanly and recreate or respawn the supervisor pane without disturbing the live Claude/Codex panes.
+- Reworked the live supervisor flow to resume from persisted state, including in-flight turns and boundary pauses, instead of assuming the run always starts from turn 1.
+- Expanded live supervisor commands with `show final-plan`, `show package`, `show diff`, and `show manifest`, and made `status` surface executor/reviewer, approval state, read-only violations, package summary, and pane modes.
+- Added `scripts/live-smoke.sh` to smoke test detached live startup plus supervisor-pane kill-and-resume recovery.
+- Updated the English README, Chinese README, and `peer-forge-live` skill docs for the new resume flow, richer supervisor inspection, and smoke harness.
 
 ## v0.11.0 - 2026-03-29
 
