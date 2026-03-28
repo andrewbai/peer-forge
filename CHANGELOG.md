@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+Nothing yet.
+
+## v0.11.0 - 2026-03-29
+
 Live startup behavior clarified and hardened.
 
 - Kept live-mode protocol automation while explicitly leaving CLI-native safety/trust confirmations as manual supervisor actions.
