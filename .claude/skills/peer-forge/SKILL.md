@@ -34,7 +34,15 @@ If the user only gives a task:
 
 ## What To Run
 
-From a project root that already contains this toolkit:
+If this toolkit has been installed globally into Claude Code:
+
+```bash
+~/.peer-forge/bin/peer-forge \
+  --repo . \
+  --task "用户的原始任务"
+```
+
+If the current project already vendors this toolkit locally:
 
 ```bash
 python3 tools/peer_consensus.py \
@@ -42,20 +50,20 @@ python3 tools/peer_consensus.py \
   --task "用户的原始任务"
 ```
 
-If the user also gave scope:
+If the user also gave scope, append:
 
 ```bash
-python3 tools/peer_consensus.py \
+~/.peer-forge/bin/peer-forge \
   --repo . \
   --task "用户的原始任务" \
   --scope path/to/file1 \
   --scope path/to/file2
 ```
 
-If the user gave hard constraints:
+If the user gave hard constraints, append:
 
 ```bash
-python3 tools/peer_consensus.py \
+~/.peer-forge/bin/peer-forge \
   --repo . \
   --task "用户的原始任务" \
   --acceptance "不要改 public API" \
@@ -65,11 +73,13 @@ python3 tools/peer_consensus.py \
 If the user wants the final approved result copied back:
 
 ```bash
-python3 tools/peer_consensus.py \
+~/.peer-forge/bin/peer-forge \
   --repo . \
   --task "用户的原始任务" \
   --apply-final
 ```
+
+If `~/.peer-forge/bin/peer-forge` does not exist but `tools/peer_consensus.py` exists in the current project, use the local project command instead.
 
 ## How To Think
 

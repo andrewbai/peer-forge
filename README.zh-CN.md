@@ -14,12 +14,15 @@
 
 这个仓库的目标不是绑死在某一个项目里，而是作为一个独立工具仓库存在，之后按需同步到别的项目中使用。
 
-当前版本：`v0.3.0`
+当前版本：`v0.4.0`
 
 ## 目录结构
 
 ```text
 peer-consensus-toolkit/
+├── bin/
+│   ├── peer-consensus
+│   └── peer-forge
 ├── .claude/
 │   └── skills/
 │       ├── peer-forge/
@@ -30,6 +33,8 @@ peer-consensus-toolkit/
 │           ├── SKILL.md
 │           └── scripts/
 │               └── codex-headless-collab.sh
+├── scripts/
+│   └── install-claude-skills.sh
 ├── tools/
 │   └── peer_consensus.py
 ├── README.md
@@ -69,7 +74,51 @@ python3 --version
 git --version
 ```
 
-## 两种使用方式
+## 为什么不是把整个仓库都塞进 `.claude`
+
+因为 `.claude/skills/` 本质上只应该放 skill 本身。
+
+- `SKILL.md` 和 skill 自带的小脚本，应该放在 `.claude/skills/`
+- `tools/peer_consensus.py`、`bin/peer-forge` 这种运行工具，不应该混在 `.claude` 配置目录里
+- `README`、`CHANGELOG`、`LICENSE`、版本文件也不是 Claude Code 运行 skill 时必须放进 `.claude` 的内容
+
+所以更干净的结构是：
+
+- 仓库本体独立放在一个稳定目录，比如 `~/.peer-forge`
+- Claude Code 只在 `~/.claude/skills/` 里注册这几个 skill
+
+## 安装到 Claude Code 里用 `skill`（推荐）
+
+如果你已经把仓库放在本机任意位置，比如现在这份：
+
+```bash
+cd /Users/andrew/Desktop/peer-consensus-toolkit
+bash scripts/install-claude-skills.sh
+```
+
+这个安装脚本会做 4 件事：
+
+1. 把当前仓库注册成 `~/.peer-forge`
+2. 把 `peer-forge` 安装到 `~/.claude/skills/peer-forge`
+3. 把 `peer-consensus` 安装到 `~/.claude/skills/peer-consensus`
+4. 把 `codex-collab` 安装到 `~/.claude/skills/codex-collab`
+
+装完后，如果 Claude Code 当时已经开着，重启一次让它重新加载 skill。
+
+之后你在任意项目里都可以直接这样说：
+
+- `/peer-forge 处理这个任务：...`
+- `/peer-consensus 按完整双 Agent 共识协议处理这个任务：...`
+
+如果你是从 GitHub 新装，一套更标准的流程是：
+
+```bash
+git clone git@github.com:andrewbai/peer-forge.git ~/peer-forge
+cd ~/peer-forge
+bash scripts/install-claude-skills.sh
+```
+
+## 两种运行方式
 
 ### 1. 作为独立工具，直接作用于任意项目
 
@@ -77,6 +126,14 @@ git --version
 
 ```bash
 python3 /path/to/peer-consensus-toolkit/tools/peer_consensus.py \
+  --repo /path/to/target-project \
+  --task "实现这次需求改动。"
+```
+
+如果你已经完成了上面的 Claude Code 全局安装，也可以直接用 launcher：
+
+```bash
+~/.peer-forge/bin/peer-forge \
   --repo /path/to/target-project \
   --task "实现这次需求改动。"
 ```
@@ -192,5 +249,6 @@ git commit -m "Initial peer consensus toolkit"
 ## 备注
 
 - 这套工具不需要长期住在某一个具体项目里。
-- skill 放在 `.claude/skills/` 下，是为了以后同步到项目根目录后还能保持相对路径正确。
+- 如果你走全局安装路线，推荐让仓库本体固定挂在 `~/.peer-forge`，Claude Code 只加载 `~/.claude/skills/` 里的 skill。
+- 如果你走项目内同步路线，skill 放在 `.claude/skills/` 下，是为了相对路径还能保持正确。
 - 如果最终候选没有拿到双方批准，主脚本会返回非零退出码。

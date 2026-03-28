@@ -14,12 +14,15 @@ Standalone toolkit for running a dual-agent coding workflow with Claude Code and
 
 This repo is meant to live on its own and be synced into future projects when needed.
 
-Current version: `v0.3.0`
+Current version: `v0.4.0`
 
 ## Structure
 
 ```text
 peer-consensus-toolkit/
+├── bin/
+│   ├── peer-consensus
+│   └── peer-forge
 ├── .claude/
 │   └── skills/
 │       ├── peer-forge/
@@ -30,6 +33,8 @@ peer-consensus-toolkit/
 │           ├── SKILL.md
 │           └── scripts/
 │               └── codex-headless-collab.sh
+├── scripts/
+│   └── install-claude-skills.sh
 ├── tools/
 │   └── peer_consensus.py
 └── README.md
@@ -68,6 +73,50 @@ python3 --version
 git --version
 ```
 
+## Why Not Copy The Whole Repo Into `.claude`
+
+Because `.claude/skills/` should contain the skills, not the entire toolkit repository.
+
+- `SKILL.md` files and tiny helper scripts belong in `.claude/skills/`
+- executable tooling such as `tools/peer_consensus.py` and `bin/peer-forge` should stay in the toolkit repo
+- docs and release metadata do not need to live inside Claude Code's skill directory
+
+The cleaner split is:
+
+- keep the toolkit repo in one stable location such as `~/.peer-forge`
+- register only the skills inside `~/.claude/skills/`
+
+## Install Into Claude Code As Skills
+
+If you already have this repo somewhere locally:
+
+```bash
+cd /Users/andrew/Desktop/peer-consensus-toolkit
+bash scripts/install-claude-skills.sh
+```
+
+That installer will:
+
+1. register the current checkout as `~/.peer-forge`
+2. install `peer-forge` into `~/.claude/skills/peer-forge`
+3. install `peer-consensus` into `~/.claude/skills/peer-consensus`
+4. install `codex-collab` into `~/.claude/skills/codex-collab`
+
+If Claude Code is already open, restart it once so it reloads the skills.
+
+Then in any project you can use:
+
+- `/peer-forge ...`
+- `/peer-consensus ...`
+
+Fresh install from GitHub:
+
+```bash
+git clone git@github.com:andrewbai/peer-forge.git ~/peer-forge
+cd ~/peer-forge
+bash scripts/install-claude-skills.sh
+```
+
 ## Usage Modes
 
 ### 1. Standalone Against Any Project
@@ -76,6 +125,14 @@ You can keep this toolkit in its own repo and point it at another codebase:
 
 ```bash
 python3 /path/to/peer-consensus-toolkit/tools/peer_consensus.py \
+  --repo /path/to/target-project \
+  --task "Implement the requested change."
+```
+
+If you have already installed the global launcher, this is shorter:
+
+```bash
+~/.peer-forge/bin/peer-forge \
   --repo /path/to/target-project \
   --task "Implement the requested change."
 ```
@@ -181,5 +238,6 @@ Then create your GitHub repo and push as usual.
 ## Notes
 
 - The toolkit does not require living inside a specific project.
-- The skills are kept in `.claude/skills/` so their relative paths still work when you sync them into a project root.
+- For global installation, keep the toolkit mounted at `~/.peer-forge` and let Claude Code load only `~/.claude/skills/`.
+- For project-local vendoring, the skills stay in `.claude/skills/` so the relative paths still work inside that repo.
 - The main script exits non-zero if the final candidate does not get dual approval.

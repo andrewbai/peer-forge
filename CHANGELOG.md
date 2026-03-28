@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.4.0 - 2026-03-28
+
+Claude Code installation flow and global launchers.
+
+- Added `bin/peer-forge` and `bin/peer-consensus` launcher scripts so the toolkit can run from a stable global path.
+- Added `scripts/install-claude-skills.sh` to register the toolkit under `~/.peer-forge` and install the skills into `~/.claude/skills/`.
+- Updated the skill docs and both README files to distinguish global Claude Code installation from project-local vendoring.
+
 ## v0.3.0 - 2026-03-28
 
 CLI cleanup and plan-stage optimization.
