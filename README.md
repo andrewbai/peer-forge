@@ -97,6 +97,12 @@ Project-local vendoring:
   --apply-final
 ```
 
+Useful runtime flags:
+
+- `--agent-timeout-seconds 1800` sets a per-stage Claude/Codex timeout. Use `0` to disable it.
+- `--cleanup-workspaces` removes the temporary isolated workspaces after the run.
+- `--keep-workspaces` keeps those isolated workspaces even when cleanup is enabled. `--keep-run-dir` remains as a deprecated alias.
+
 Upgrade the installed checkout:
 
 ```bash
@@ -168,6 +174,12 @@ That directory includes:
 - `report.json`
 - `report.md`
 
+Runtime behavior:
+
+- Progress logs stream to `stderr`, so the terminal shows which phase is currently running.
+- Final machine-readable output stays on `stdout` as JSON.
+- `report.json` and `report.md` are written for both completed runs and failed runs.
+
 ## Skills
 
 ### `peer-forge`
@@ -191,4 +203,4 @@ Self-upgrade helper for refreshing the installed `peer-forge` checkout through t
 - The repo itself is the main skill. `~/.claude/skills/peer-forge/SKILL.md` is directly discoverable by Claude Code.
 - Sub-skills are registered as sibling symlinks by `setup`.
 - All skill docs route through the `bin/` launchers rather than calling the Python entrypoint directly.
-- The main script exits non-zero if the final candidate does not get dual approval.
+- Exit codes: `0` = approved final result, `1` = runtime failure, `2` = run completed but the final candidate was not approved.

@@ -12,6 +12,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import textwrap
 import uuid
 from dataclasses import dataclass
@@ -327,9 +328,11 @@ def parse_args() -> argparse.Namespace:
         help="Remove the temporary isolated workspaces after the run completes.",
     )
     parser.add_argument(
+        "--keep-workspaces",
         "--keep-run-dir",
+        dest="keep_workspaces",
         action="store_true",
-        help="Keep the run directory even if cleanup-workspaces is set.",
+        help="Keep isolated workspaces even if cleanup-workspaces is set. `--keep-run-dir` is a deprecated alias.",
     )
     parser.add_argument(
         "--run-root",
@@ -345,6 +348,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--agent-timeout-seconds must be >= 0.")
     if "--signoff-rounds" in sys.argv:
         print("Warning: --signoff-rounds is deprecated; use --review-rounds.", file=sys.stderr)
+    if "--keep-run-dir" in sys.argv:
+        print("Warning: --keep-run-dir is deprecated; use --keep-workspaces.", file=sys.stderr)
     return args
 
 
@@ -1275,11 +1280,34 @@ def apply_final_to_source(repo: Path, workspace: Path, changed_files: list[str])
 
 
 def markdown_report(data: dict[str, Any]) -> str:
+    status = str(data.get("status", "completed"))
+    if status == "failed":
+        lines = [
+            f"# Peer Consensus Run {data['run_id']}",
+            "",
+            f"- Repo: `{data['repo']}`",
+            f"- Task: {data['task'].strip()}",
+            f"- Status: `{status}`",
+            f"- Failed phase: `{data.get('failed_phase', 'unknown')}`",
+            f"- Exit code: `{data.get('exit_code', 1)}`",
+            "",
+            "## Error",
+            data.get("error", "Unknown error."),
+            "",
+            "## Artifacts",
+            f"- Run dir: `{data['run_dir']}`",
+            f"- Report file: `{Path(data['run_dir']) / 'report.json'}`",
+            f"- Traceback file: `{data.get('traceback_file', '')}`",
+        ]
+        return "\n".join(lines) + "\n"
+
     lines = [
         f"# Peer Consensus Run {data['run_id']}",
         "",
         f"- Repo: `{data['repo']}`",
         f"- Task: {data['task'].strip()}",
+        f"- Status: `{status}`",
+        f"- Exit code: `{data.get('exit_code', 0 if data.get('final_approved') else 2)}`",
         f"- Final plan base: `{data['final_plan_base']}`",
         f"- Executor: `{data['executor']}`",
         f"- Reviewer: `{data['reviewer']}`",
@@ -1336,23 +1364,30 @@ def main() -> int:
             "review_rounds": args.review_rounds,
             "agent_timeout_seconds": args.agent_timeout_seconds,
             "apply_final": args.apply_final,
+            "cleanup_workspaces": args.cleanup_workspaces,
+            "keep_workspaces": args.keep_workspaces,
         },
     )
 
-    workspaces = prepare_workspaces(repo, run_dir, args.include_path)
-    log_progress("Prepared isolated workspaces.")
+    current_phase = "prepare-workspaces"
+    workspaces: WorkspaceSet | None = None
     final_report: dict[str, Any] = {}
-    common_stage_kwargs = {
-        "baseline": workspaces.baseline,
-        "git_mode": workspaces.git_mode,
-        "claude_model": args.claude_model,
-        "codex_model": args.codex_model,
-        "claude_bare": not args.no_claude_bare,
-        "agent_timeout": agent_timeout,
-    }
 
     try:
+        workspaces = prepare_workspaces(repo, run_dir, args.include_path)
+        log_progress("Prepared isolated workspaces.")
+        common_stage_kwargs = {
+            "baseline": workspaces.baseline,
+            "git_mode": workspaces.git_mode,
+            "claude_model": args.claude_model,
+            "codex_model": args.codex_model,
+            "claude_bare": not args.no_claude_bare,
+            "agent_timeout": agent_timeout,
+        }
+
+        current_phase = "plan-consensus"
         log_progress("Phase 1/3: Plan consensus (4 parallel stages + final plan)")
+        current_phase = "plan-initial"
         initial_claude, initial_codex = run_parallel_stage_pair(
             claude_kwargs={
                 **common_stage_kwargs,
@@ -1378,6 +1413,7 @@ def main() -> int:
             },
         )
 
+        current_phase = "plan-review"
         review_claude, review_codex = run_parallel_stage_pair(
             claude_kwargs={
                 **common_stage_kwargs,
@@ -1417,6 +1453,7 @@ def main() -> int:
             },
         )
 
+        current_phase = "plan-revise"
         revised_claude, revised_codex = run_parallel_stage_pair(
             claude_kwargs={
                 **common_stage_kwargs,
@@ -1456,6 +1493,7 @@ def main() -> int:
             },
         )
 
+        current_phase = "plan-consensus-evaluate"
         consensus_claude, consensus_codex = run_parallel_stage_pair(
             claude_kwargs={
                 **common_stage_kwargs,
@@ -1520,6 +1558,7 @@ def main() -> int:
             reviewer_name = "Claude Code"
         log_progress(f"Execution assignment: executor={executor_name}, reviewer={reviewer_name}.")
 
+        current_phase = "plan-finalize"
         final_plan = run_agent_stage(
             **common_stage_kwargs,
             agent=final_plan_base,
@@ -1543,7 +1582,9 @@ def main() -> int:
         final_plan_file = run_dir / "final-plan.json"
         write_json(final_plan_file, final_plan.parsed)
 
+        current_phase = "execution"
         log_progress("Phase 2/3: Execution")
+        current_phase = "execute-initial"
         current_execution = run_agent_stage(
             **common_stage_kwargs,
             agent=final_plan_base,
@@ -1565,8 +1606,10 @@ def main() -> int:
         implementation_review: StageRun | None = None
         final_approved = False
 
+        current_phase = "implementation-review"
         log_progress("Phase 3/3: Implementation review")
         for round_idx in range(args.review_rounds + 1):
+            current_phase = f"implementation-review-{round_idx}"
             implementation_review = run_agent_stage(
                 **common_stage_kwargs,
                 agent="codex" if final_plan_base == "claude" else "claude",
@@ -1601,6 +1644,7 @@ def main() -> int:
                 f"Implementation review requested changes; starting fix round {round_idx + 1} of {args.review_rounds}."
             )
 
+            current_phase = f"execute-fix-{round_idx + 1}"
             current_execution = run_agent_stage(
                 **common_stage_kwargs,
                 agent=final_plan_base,
@@ -1621,6 +1665,7 @@ def main() -> int:
             )
 
         if args.apply_final and final_approved:
+            current_phase = "apply-final"
             apply_final_to_source(repo, current_execution.workspace, current_execution.changed_files)
             log_progress("Applied approved final files back to the source workspace.")
 
@@ -1629,6 +1674,8 @@ def main() -> int:
             "repo": str(repo),
             "task": task,
             "run_dir": str(run_dir),
+            "status": "completed",
+            "exit_code": 0 if final_approved else 2,
             "final_plan_base": final_plan_base,
             "executor": final_plan_base,
             "reviewer": "codex" if final_plan_base == "claude" else "claude",
@@ -1643,10 +1690,32 @@ def main() -> int:
         log_progress(f"Run {run_id} finished; final_approved={final_approved}; report={run_dir / 'report.json'}")
         print(json.dumps(final_report, ensure_ascii=True, indent=2))
         return 0 if final_approved else 2
+    except Exception as exc:
+        traceback_path = run_dir / "failure-traceback.txt"
+        write_text(traceback_path, traceback.format_exc())
+        final_report = {
+            "run_id": run_id,
+            "repo": str(repo),
+            "task": task,
+            "run_dir": str(run_dir),
+            "status": "failed",
+            "exit_code": 1,
+            "failed_phase": current_phase,
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+            "traceback_file": str(traceback_path),
+        }
+        write_json(run_dir / "report.json", final_report)
+        write_text(run_dir / "report.md", markdown_report(final_report))
+        log_progress(
+            f"Run {run_id} failed in {current_phase}; report={run_dir / 'report.json'}; error={type(exc).__name__}: {exc}"
+        )
+        print(json.dumps(final_report, ensure_ascii=True, indent=2))
+        return 1
     finally:
-        if args.cleanup_workspaces:
+        if args.cleanup_workspaces and workspaces is not None:
             cleanup_workspaces(repo, workspaces)
-            if not args.keep_run_dir:
+            if not args.keep_workspaces:
                 shutil.rmtree(run_dir / "workspaces", ignore_errors=True)
 
 

@@ -100,6 +100,12 @@ git clone git@github.com:andrewbai/peer-forge.git .claude/skills/peer-forge
   --apply-final
 ```
 
+常用运行参数：
+
+- `--agent-timeout-seconds 1800` 为每个 Claude/Codex 阶段设置超时，传 `0` 表示关闭超时。
+- `--cleanup-workspaces` 在运行结束后删除临时隔离工作区。
+- `--keep-workspaces` 会在启用 cleanup 时仍然保留这些隔离工作区。`--keep-run-dir` 仍可用，但已废弃。
+
 升级已安装的 checkout：
 
 ```bash
@@ -174,6 +180,12 @@ git --version
 - `report.json`
 - `report.md`
 
+运行行为：
+
+- 进度日志会输出到 `stderr`，终端里可以看到当前跑到哪个阶段。
+- 最终机器可读输出仍然会以 JSON 形式写到 `stdout`。
+- 无论运行完成还是中途失败，都会写出 `report.json` 和 `report.md`。
+
 ## Skills 说明
 
 ### `peer-forge`
@@ -208,4 +220,4 @@ git --version
 - 仓库本体本身就是主 skill，`~/.claude/skills/peer-forge/SKILL.md` 会被 Claude Code 直接发现。
 - 子 skill 由 `setup` 自动注册成 sibling symlink。
 - 所有 skill 文档都统一走 `bin/` launcher，不直接写 Python 入口。
-- 如果最终候选没有拿到双方批准，主脚本会返回非零退出码。
+- 退出码：`0` 表示最终结果获批，`1` 表示运行时失败，`2` 表示流程跑完但最终候选没有获批。
