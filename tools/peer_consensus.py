@@ -266,6 +266,14 @@ def format_cmd_display(cmd: list[str], *, max_arg_length: int = 160) -> str:
     return " ".join(parts)
 
 
+def normalize_subprocess_output(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run a dual-agent peer-consensus coding workflow with Claude Code and Codex.",
@@ -380,8 +388,8 @@ def run_cmd(
             env=merged_env,
         )
     except subprocess.TimeoutExpired as exc:
-        stdout = exc.stdout or ""
-        stderr = exc.stderr or ""
+        stdout = normalize_subprocess_output(exc.stdout)
+        stderr = normalize_subprocess_output(exc.stderr)
         raise RuntimeError(
             f"Command timed out after {timeout}s: {format_cmd_display(cmd)}\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}"
         ) from exc
@@ -1344,6 +1352,7 @@ def main() -> int:
     }
 
     try:
+        log_progress("Phase 1/3: Plan consensus (4 parallel stages + final plan)")
         initial_claude, initial_codex = run_parallel_stage_pair(
             claude_kwargs={
                 **common_stage_kwargs,
@@ -1534,6 +1543,7 @@ def main() -> int:
         final_plan_file = run_dir / "final-plan.json"
         write_json(final_plan_file, final_plan.parsed)
 
+        log_progress("Phase 2/3: Execution")
         current_execution = run_agent_stage(
             **common_stage_kwargs,
             agent=final_plan_base,
@@ -1555,6 +1565,7 @@ def main() -> int:
         implementation_review: StageRun | None = None
         final_approved = False
 
+        log_progress("Phase 3/3: Implementation review")
         for round_idx in range(args.review_rounds + 1):
             implementation_review = run_agent_stage(
                 **common_stage_kwargs,
