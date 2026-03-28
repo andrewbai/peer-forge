@@ -171,6 +171,7 @@ git --version
 里面包括：
 
 - task 和 config
+- `progress.log`
 - 隔离工作区
 - 每个阶段的 prompt
 - 模型输出
@@ -183,8 +184,10 @@ git --version
 运行行为：
 
 - 进度日志会输出到 `stderr`，终端里可以看到当前跑到哪个阶段。
+- 同样的进度内容也会写入运行目录里的 `progress.log`。
 - 最终机器可读输出仍然会以 JSON 形式写到 `stdout`。
 - 无论运行完成还是中途失败，都会写出 `report.json` 和 `report.md`。
+- `report.json` 里还会包含 `progress_log` 路径和结构化的 `stage_timings` 阶段耗时信息。
 
 ## Skills 说明
 

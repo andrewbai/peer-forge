@@ -32,6 +32,8 @@ SEVERITY_WEIGHTS = {
     "info": 0,
 }
 PROGRESS_LOCK = threading.Lock()
+PROGRESS_LOG_PATH: Path | None = None
+STAGE_TIMINGS: list[dict[str, Any]] = []
 
 
 PLAN_SCHEMA: dict[str, Any] = {
@@ -234,6 +236,10 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
+def utc_timestamp_precise() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
 def format_duration(seconds: float) -> str:
     rounded = int(round(seconds))
     minutes, secs = divmod(rounded, 60)
@@ -253,8 +259,38 @@ def format_timeout(timeout: int | None) -> str:
 
 def log_progress(message: str) -> None:
     timestamp = datetime.now().astimezone().strftime("%H:%M:%S")
+    line = f"[peer-consensus {timestamp}] {message}"
     with PROGRESS_LOCK:
-        print(f"[peer-consensus {timestamp}] {message}", file=sys.stderr, flush=True)
+        print(line, file=sys.stderr, flush=True)
+        if PROGRESS_LOG_PATH is not None:
+            with PROGRESS_LOG_PATH.open("a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
+
+
+def initialize_run_state(progress_log_path: Path) -> None:
+    global PROGRESS_LOG_PATH, STAGE_TIMINGS
+    with PROGRESS_LOCK:
+        PROGRESS_LOG_PATH = progress_log_path
+        STAGE_TIMINGS = []
+        progress_log_path.parent.mkdir(parents=True, exist_ok=True)
+        progress_log_path.write_text("", encoding="utf-8")
+
+
+def finalize_run_state() -> None:
+    global PROGRESS_LOG_PATH, STAGE_TIMINGS
+    with PROGRESS_LOCK:
+        PROGRESS_LOG_PATH = None
+        STAGE_TIMINGS = []
+
+
+def record_stage_timing(entry: dict[str, Any]) -> None:
+    with PROGRESS_LOCK:
+        STAGE_TIMINGS.append(entry)
+
+
+def snapshot_stage_timings() -> list[dict[str, Any]]:
+    with PROGRESS_LOCK:
+        return [dict(item) for item in STAGE_TIMINGS]
 
 
 def format_cmd_display(cmd: list[str], *, max_arg_length: int = 160) -> str:
@@ -1123,7 +1159,8 @@ def run_agent_stage(
     read_only: bool,
 ) -> StageRun:
     mode_label = "read-only" if read_only else "write"
-    started_at = time.monotonic()
+    started_monotonic = time.monotonic()
+    started_at = utc_timestamp_precise()
     log_progress(
         f"{phase}: {agent} started ({mode_label}, timeout={format_timeout(agent_timeout)})"
     )
@@ -1167,7 +1204,22 @@ def run_agent_stage(
             changed_files, diff_path = create_empty_package(package_dir)
         else:
             changed_files, diff_path = collect_package(workspace, baseline, package_dir, git_mode)
-        duration = format_duration(time.monotonic() - started_at)
+        duration_seconds = round(time.monotonic() - started_monotonic, 3)
+        ended_at = utc_timestamp_precise()
+        record_stage_timing(
+            {
+                "phase": phase,
+                "agent": agent,
+                "status": "completed",
+                "read_only": read_only,
+                "started_at": started_at,
+                "ended_at": ended_at,
+                "duration_seconds": duration_seconds,
+                "timeout_seconds": agent_timeout,
+                "stage_dir": str(stage_dir),
+            }
+        )
+        duration = format_duration(duration_seconds)
         log_progress(f"{phase}: {agent} completed in {duration}")
         return StageRun(
             agent=agent,
@@ -1183,7 +1235,24 @@ def run_agent_stage(
             package_dir=package_dir,
         )
     except Exception as exc:
-        duration = format_duration(time.monotonic() - started_at)
+        duration_seconds = round(time.monotonic() - started_monotonic, 3)
+        ended_at = utc_timestamp_precise()
+        record_stage_timing(
+            {
+                "phase": phase,
+                "agent": agent,
+                "status": "failed",
+                "read_only": read_only,
+                "started_at": started_at,
+                "ended_at": ended_at,
+                "duration_seconds": duration_seconds,
+                "timeout_seconds": agent_timeout,
+                "stage_dir": str(stage_dir),
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            }
+        )
+        duration = format_duration(duration_seconds)
         log_progress(f"{phase}: {agent} failed after {duration}: {exc}")
         raise
 
@@ -1296,6 +1365,7 @@ def markdown_report(data: dict[str, Any]) -> str:
             "",
             "## Artifacts",
             f"- Run dir: `{data['run_dir']}`",
+            f"- Progress log: `{data.get('progress_log', '')}`",
             f"- Report file: `{Path(data['run_dir']) / 'report.json'}`",
             f"- Traceback file: `{data.get('traceback_file', '')}`",
         ]
@@ -1329,6 +1399,7 @@ def markdown_report(data: dict[str, Any]) -> str:
             "",
             "## Artifacts",
             f"- Run dir: `{data['run_dir']}`",
+            f"- Progress log: `{data.get('progress_log', '')}`",
             f"- Final plan file: `{data['final_plan_file']}`",
             f"- Final package: `{data['final_package']}`",
         ]
@@ -1347,6 +1418,8 @@ def main() -> int:
     run_id = f"{utc_now()}-{uuid.uuid4().hex[:8]}"
     run_dir = run_root / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
+    progress_log_path = run_dir / "progress.log"
+    initialize_run_state(progress_log_path)
     log_progress(
         f"Run {run_id} started for {repo}; artifacts: {run_dir}; agent-timeout={format_timeout(agent_timeout)}"
     )
@@ -1676,6 +1749,8 @@ def main() -> int:
             "run_dir": str(run_dir),
             "status": "completed",
             "exit_code": 0 if final_approved else 2,
+            "progress_log": str(progress_log_path),
+            "stage_timings": snapshot_stage_timings(),
             "final_plan_base": final_plan_base,
             "executor": final_plan_base,
             "reviewer": "codex" if final_plan_base == "claude" else "claude",
@@ -1700,6 +1775,8 @@ def main() -> int:
             "run_dir": str(run_dir),
             "status": "failed",
             "exit_code": 1,
+            "progress_log": str(progress_log_path),
+            "stage_timings": snapshot_stage_timings(),
             "failed_phase": current_phase,
             "error_type": type(exc).__name__,
             "error": str(exc),
@@ -1713,10 +1790,13 @@ def main() -> int:
         print(json.dumps(final_report, ensure_ascii=True, indent=2))
         return 1
     finally:
-        if args.cleanup_workspaces and workspaces is not None:
-            cleanup_workspaces(repo, workspaces)
-            if not args.keep_workspaces:
-                shutil.rmtree(run_dir / "workspaces", ignore_errors=True)
+        try:
+            if args.cleanup_workspaces and workspaces is not None:
+                cleanup_workspaces(repo, workspaces)
+                if not args.keep_workspaces:
+                    shutil.rmtree(run_dir / "workspaces", ignore_errors=True)
+        finally:
+            finalize_run_state()
 
 
 if __name__ == "__main__":

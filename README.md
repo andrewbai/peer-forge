@@ -165,6 +165,7 @@ Each run writes artifacts under the target repo:
 That directory includes:
 
 - task and config
+- `progress.log`
 - isolated workspaces
 - prompts
 - model outputs
@@ -177,8 +178,10 @@ That directory includes:
 Runtime behavior:
 
 - Progress logs stream to `stderr`, so the terminal shows which phase is currently running.
+- The same progress lines are also written to `progress.log` inside the run directory.
 - Final machine-readable output stays on `stdout` as JSON.
 - `report.json` and `report.md` are written for both completed runs and failed runs.
+- `report.json` includes `progress_log` and structured `stage_timings` entries for each Claude/Codex stage.
 
 ## Skills
 
