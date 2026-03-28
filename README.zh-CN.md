@@ -21,6 +21,8 @@
 peer-consensus-toolkit/
 ├── .claude/
 │   └── skills/
+│       ├── peer-forge/
+│       │   └── SKILL.md
 │       ├── peer-consensus/
 │       │   └── SKILL.md
 │       └── codex-collab/
@@ -32,6 +34,23 @@ peer-consensus-toolkit/
 ├── README.md
 └── README.zh-CN.md
 ```
+
+## 最简单的 Skill 用法
+
+如果你不想手动组织一堆参数，就用 `peer-forge`。
+
+`peer-forge` 是更产品化的入口：
+
+- 只给任务也可以
+- `acceptance` 不是必填
+- `scope` 也不是必填
+
+你在 Claude Code 里可以直接表达这种意图：
+
+- `使用 peer-forge skill 处理这个任务`
+- `/peer-forge 让 Claude 和 Codex 都出方案，互相 review，然后收敛成最终版本`
+
+底层依然是跑 `tools/peer_consensus.py`，但它把“只给任务”视为正常用法。
 
 ## 环境要求
 
@@ -58,6 +77,14 @@ git --version
 ```bash
 python3 /path/to/peer-consensus-toolkit/tools/peer_consensus.py \
   --repo /path/to/target-project \
+  --task "实现这次需求改动。"
+```
+
+只有在需要时，再补 `--scope` 和 `--acceptance`：
+
+```bash
+python3 /path/to/peer-consensus-toolkit/tools/peer_consensus.py \
+  --repo /path/to/target-project \
   --task "实现这次需求改动。" \
   --acceptance "不要破坏公开 API。" \
   --scope src/example.ts
@@ -77,19 +104,20 @@ python3 /path/to/peer-consensus-toolkit/tools/peer_consensus.py \
 
 把下面这些路径复制到目标项目根目录：
 
+- `.claude/skills/peer-forge/`
 - `.claude/skills/peer-consensus/`
 - `.claude/skills/codex-collab/`
 - `tools/peer_consensus.py`
 
-然后在目标项目根目录执行：
+然后可以直接用 skill 思路，或者直接跑脚本：
 
 ```bash
 python3 tools/peer_consensus.py \
   --repo . \
-  --task "实现这次需求改动。" \
-  --acceptance "不要破坏公开 API。" \
-  --scope src/example.ts
+  --task "实现这次需求改动。"
 ```
+
+只有在有必要时，再补 `--scope` 和 `--acceptance`。
 
 ## 这套工作流具体做什么
 
@@ -123,14 +151,27 @@ python3 tools/peer_consensus.py \
 
 ## Skills 说明
 
+### `peer-forge`
+
+这是更适合日常使用的前门入口。
+
+适用于：
+
+- 想用 skill 的方式
+- 不想先想清楚所有 CLI 参数
+- 只有一句任务描述也想直接跑
+
 ### `peer-consensus`
 
-这是完整双 Agent 共识协议的 Claude skill 入口，适用于：
+这是更底层的完整双 Agent 共识协议入口，适用于：
 
 - 需要两个平级 Agent
 - 需要初始阶段互不污染
 - 需要交叉评审和收敛
 - 需要最终双方都认可
+- 希望更明确地控制 `task / acceptance / scope`
+
+### `peer-consensus`
 
 ### `codex-collab`
 

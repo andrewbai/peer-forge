@@ -21,6 +21,8 @@ Current version: `v0.1.0`
 peer-consensus-toolkit/
 ├── .claude/
 │   └── skills/
+│       ├── peer-forge/
+│       │   └── SKILL.md
 │       ├── peer-consensus/
 │       │   └── SKILL.md
 │       └── codex-collab/
@@ -31,6 +33,23 @@ peer-consensus-toolkit/
 │   └── peer_consensus.py
 └── README.md
 ```
+
+## Fastest Skill-First Usage
+
+If you prefer the skill route over manually composing arguments, use `peer-forge`.
+
+`peer-forge` is the easier entrypoint:
+
+- task is required
+- acceptance criteria are optional
+- scope is optional
+
+Example intent:
+
+- `Use the peer-forge skill for this task`
+- `/peer-forge refactor this module so Claude Code and Codex draft independently, review each other, and converge`
+
+Under the hood, the skill still runs `tools/peer_consensus.py`, but it treats task-only usage as normal.
 
 ## Requirements
 
@@ -57,6 +76,14 @@ You can keep this toolkit in its own repo and point it at another codebase:
 ```bash
 python3 /path/to/peer-consensus-toolkit/tools/peer_consensus.py \
   --repo /path/to/target-project \
+  --task "Implement the requested change."
+```
+
+Add `--scope` and `--acceptance` only when needed:
+
+```bash
+python3 /path/to/peer-consensus-toolkit/tools/peer_consensus.py \
+  --repo /path/to/target-project \
   --task "Implement the requested change." \
   --acceptance "Do not break the public API." \
   --scope src/example.ts
@@ -76,19 +103,20 @@ python3 /path/to/peer-consensus-toolkit/tools/peer_consensus.py \
 
 Copy these paths into the root of the target project:
 
+- `.claude/skills/peer-forge/`
 - `.claude/skills/peer-consensus/`
 - `.claude/skills/codex-collab/`
 - `tools/peer_consensus.py`
 
-Then run from that project root:
+Then use either the skill-first path or the script:
 
 ```bash
 python3 tools/peer_consensus.py \
   --repo . \
-  --task "Implement the requested change." \
-  --acceptance "Do not break the public API." \
-  --scope src/example.ts
+  --task "Implement the requested change."
 ```
+
+Add `--scope` and `--acceptance` only when useful.
 
 ## What The Workflow Does
 
@@ -121,14 +149,15 @@ That directory includes:
 
 ## Skills
 
+### `peer-forge`
+
+The simpler front door. Use this when the user wants the workflow but does not want to think in terms of detailed CLI flags.
+
+Task-only usage is valid.
+
 ### `peer-consensus`
 
-Claude skill wrapper for the full dual-agent protocol. It is the main entry point when you want:
-
-- two peer agents
-- initial non-contamination
-- review and convergence
-- final dual sign-off
+The lower-level workflow when you want more explicit control over task, acceptance criteria, and scope.
 
 ### `codex-collab`
 
