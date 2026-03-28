@@ -100,6 +100,7 @@ Project-local vendoring:
 Useful runtime flags:
 
 - `--agent-timeout-seconds 1800` sets a per-stage Claude/Codex timeout. Use `0` to disable it.
+- `--supervise` streams Claude/Codex output to the terminal and writes prefixed verbose logs without changing the protocol.
 - `--cleanup-workspaces` removes the temporary isolated workspaces after the run.
 - `--keep-workspaces` keeps those isolated workspaces even when cleanup is enabled. `--keep-run-dir` remains as a deprecated alias.
 
@@ -166,6 +167,7 @@ That directory includes:
 
 - task and config
 - `progress.log`
+- `supervisor.log` when `--supervise` is enabled
 - isolated workspaces
 - prompts
 - model outputs
@@ -179,9 +181,11 @@ Runtime behavior:
 
 - Progress logs stream to `stderr`, so the terminal shows which phase is currently running.
 - The same progress lines are also written to `progress.log` inside the run directory.
+- With `--supervise`, Claude/Codex stdout and stderr are streamed live to the terminal with prefixes and mirrored into a run-level `supervisor.log`.
+- With `--supervise`, each stage also gets a prefixed `<stage-dir>/verbose.log` alongside the raw `stdout.txt` and `stderr.txt`.
 - Final machine-readable output stays on `stdout` as JSON.
 - `report.json` and `report.md` are written for both completed runs and failed runs.
-- `report.json` includes `progress_log` and structured `stage_timings` entries for each Claude/Codex stage.
+- `report.json` includes `progress_log`, `supervisor_log`, and structured `stage_timings` entries for each Claude/Codex stage.
 
 ## Skills
 

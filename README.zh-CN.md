@@ -103,6 +103,7 @@ git clone git@github.com:andrewbai/peer-forge.git .claude/skills/peer-forge
 常用运行参数：
 
 - `--agent-timeout-seconds 1800` 为每个 Claude/Codex 阶段设置超时，传 `0` 表示关闭超时。
+- `--supervise` 会把 Claude/Codex 的输出实时流式打印到终端，同时写入带前缀的详细日志，但不改变协议本身。
 - `--cleanup-workspaces` 在运行结束后删除临时隔离工作区。
 - `--keep-workspaces` 会在启用 cleanup 时仍然保留这些隔离工作区。`--keep-run-dir` 仍可用，但已废弃。
 
@@ -172,6 +173,7 @@ git --version
 
 - task 和 config
 - `progress.log`
+- 启用 `--supervise` 时还会有 `supervisor.log`
 - 隔离工作区
 - 每个阶段的 prompt
 - 模型输出
@@ -185,9 +187,11 @@ git --version
 
 - 进度日志会输出到 `stderr`，终端里可以看到当前跑到哪个阶段。
 - 同样的进度内容也会写入运行目录里的 `progress.log`。
+- 启用 `--supervise` 后，Claude/Codex 的 stdout 和 stderr 会带前缀实时打印到终端，并同步写入 run 级别的 `supervisor.log`。
+- 启用 `--supervise` 后，每个 stage 目录下也会多出一个带前缀的 `<stage-dir>/verbose.log`，和原始的 `stdout.txt` / `stderr.txt` 并存。
 - 最终机器可读输出仍然会以 JSON 形式写到 `stdout`。
 - 无论运行完成还是中途失败，都会写出 `report.json` 和 `report.md`。
-- `report.json` 里还会包含 `progress_log` 路径和结构化的 `stage_timings` 阶段耗时信息。
+- `report.json` 里还会包含 `progress_log`、`supervisor_log` 路径和结构化的 `stage_timings` 阶段耗时信息。
 
 ## Skills 说明
 

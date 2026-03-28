@@ -18,7 +18,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 
 TEMP_COMMIT_NAME = "peer-consensus"
@@ -33,6 +33,7 @@ SEVERITY_WEIGHTS = {
 }
 PROGRESS_LOCK = threading.Lock()
 PROGRESS_LOG_PATH: Path | None = None
+SUPERVISOR_LOG_PATH: Path | None = None
 STAGE_TIMINGS: list[dict[str, Any]] = []
 
 
@@ -214,6 +215,7 @@ class StageRun:
     prompt_path: Path
     stdout_path: Path
     stderr_path: Path
+    verbose_path: Path
     parsed_path: Path
     parsed: dict[str, Any]
     changed_files: list[str]
@@ -265,21 +267,40 @@ def log_progress(message: str) -> None:
         if PROGRESS_LOG_PATH is not None:
             with PROGRESS_LOG_PATH.open("a", encoding="utf-8") as handle:
                 handle.write(line + "\n")
+        if SUPERVISOR_LOG_PATH is not None:
+            with SUPERVISOR_LOG_PATH.open("a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
 
 
-def initialize_run_state(progress_log_path: Path) -> None:
-    global PROGRESS_LOG_PATH, STAGE_TIMINGS
+def log_supervisor(message: str, *, verbose_handle: TextIO | None = None) -> None:
+    with PROGRESS_LOCK:
+        print(message, file=sys.stderr, flush=True)
+        if SUPERVISOR_LOG_PATH is not None:
+            with SUPERVISOR_LOG_PATH.open("a", encoding="utf-8") as handle:
+                handle.write(message + "\n")
+        if verbose_handle is not None:
+            verbose_handle.write(message + "\n")
+            verbose_handle.flush()
+
+
+def initialize_run_state(progress_log_path: Path, supervisor_log_path: Path | None) -> None:
+    global PROGRESS_LOG_PATH, SUPERVISOR_LOG_PATH, STAGE_TIMINGS
     with PROGRESS_LOCK:
         PROGRESS_LOG_PATH = progress_log_path
+        SUPERVISOR_LOG_PATH = supervisor_log_path
         STAGE_TIMINGS = []
         progress_log_path.parent.mkdir(parents=True, exist_ok=True)
         progress_log_path.write_text("", encoding="utf-8")
+        if supervisor_log_path is not None:
+            supervisor_log_path.parent.mkdir(parents=True, exist_ok=True)
+            supervisor_log_path.write_text("", encoding="utf-8")
 
 
 def finalize_run_state() -> None:
-    global PROGRESS_LOG_PATH, STAGE_TIMINGS
+    global PROGRESS_LOG_PATH, SUPERVISOR_LOG_PATH, STAGE_TIMINGS
     with PROGRESS_LOCK:
         PROGRESS_LOG_PATH = None
+        SUPERVISOR_LOG_PATH = None
         STAGE_TIMINGS = []
 
 
@@ -291,6 +312,161 @@ def record_stage_timing(entry: dict[str, Any]) -> None:
 def snapshot_stage_timings() -> list[dict[str, Any]]:
     with PROGRESS_LOCK:
         return [dict(item) for item in STAGE_TIMINGS]
+
+
+def stream_label(agent: str, phase: str, stream_name: str) -> str:
+    return f"[{utc_timestamp_precise()}][{agent}][{phase}][{stream_name}]"
+
+
+def stream_subprocess(
+    cmd: list[str],
+    *,
+    cwd: Path,
+    input_text: str | None,
+    timeout: int | None,
+    stdout_path: Path,
+    stderr_path: Path,
+    verbose_path: Path,
+    agent: str,
+    phase: str,
+) -> subprocess.CompletedProcess[str]:
+    stdout_chunks: list[str] = []
+    stderr_chunks: list[str] = []
+
+    stdout_path.parent.mkdir(parents=True, exist_ok=True)
+    stderr_path.parent.mkdir(parents=True, exist_ok=True)
+    verbose_path.parent.mkdir(parents=True, exist_ok=True)
+
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(cwd),
+        stdin=subprocess.PIPE if input_text is not None else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    )
+
+    def pump(
+        stream: TextIO,
+        raw_handle: TextIO,
+        chunks: list[str],
+        stream_name: str,
+        verbose_handle: TextIO,
+    ) -> None:
+        while True:
+            line = stream.readline()
+            if line == "":
+                break
+            chunks.append(line)
+            raw_handle.write(line)
+            raw_handle.flush()
+            log_supervisor(
+                f"{stream_label(agent, phase, stream_name)} {line.rstrip()}",
+                verbose_handle=verbose_handle,
+            )
+
+    with (
+        stdout_path.open("w", encoding="utf-8") as stdout_handle,
+        stderr_path.open("w", encoding="utf-8") as stderr_handle,
+        verbose_path.open("w", encoding="utf-8") as verbose_handle,
+    ):
+        stdout_thread = threading.Thread(
+            target=pump,
+            args=(proc.stdout, stdout_handle, stdout_chunks, "stdout", verbose_handle),
+            daemon=True,
+        )
+        stderr_thread = threading.Thread(
+            target=pump,
+            args=(proc.stderr, stderr_handle, stderr_chunks, "stderr", verbose_handle),
+            daemon=True,
+        )
+        stdout_thread.start()
+        stderr_thread.start()
+
+        if input_text is not None and proc.stdin is not None:
+            try:
+                try:
+                    proc.stdin.write(input_text)
+                    proc.stdin.flush()
+                except BrokenPipeError:
+                    pass
+            finally:
+                proc.stdin.close()
+
+        timed_out = False
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            proc.kill()
+            proc.wait()
+
+        stdout_thread.join()
+        stderr_thread.join()
+
+    stdout_text = "".join(stdout_chunks)
+    stderr_text = "".join(stderr_chunks)
+    if timed_out:
+        raise RuntimeError(
+            f"Command timed out after {timeout}s: {format_cmd_display(cmd)}\nSTDOUT:\n{stdout_text}\nSTDERR:\n{stderr_text}"
+        )
+    return subprocess.CompletedProcess(
+        cmd,
+        proc.returncode,
+        stdout_text,
+        stderr_text,
+    )
+
+
+def clip_text(text: str, limit: int = 100) -> str:
+    normalized = " ".join(text.split())
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[: limit - 3] + "..."
+
+
+def emit_stage_summary(agent: str, phase: str, schema: dict[str, Any], parsed: dict[str, Any]) -> None:
+    prefix = f"[summary][{phase}][{agent}]"
+    if schema in (PLAN_SCHEMA, PLAN_REVISION_SCHEMA, FINAL_PLAN_SCHEMA):
+        log_supervisor(
+            f"{prefix} summary=\"{clip_text(str(parsed.get('summary', '')))}\" "
+            f"steps={len(parsed.get('steps', []))} "
+            f"risks={len(parsed.get('risks', parsed.get('remaining_risks', [])))} "
+            f"tests={len(parsed.get('tests', []))}"
+        )
+        return
+    if schema is REVIEW_SCHEMA:
+        findings = parsed.get("findings", [])
+        top_finding = ""
+        if findings:
+            top_finding = clip_text(str(findings[0].get("title", "")))
+        line = (
+            f"{prefix} verdict={parsed.get('overall_verdict', '')} "
+            f"findings={len(findings)} must_fix={len(parsed.get('must_fix', []))}"
+        )
+        if top_finding:
+            line += f" top_finding=\"{top_finding}\""
+        log_supervisor(line)
+        return
+    if schema is CONSENSUS_SCHEMA:
+        blockers = len(parsed.get("blocking_objections_to_self_final", [])) + len(
+            parsed.get("blocking_objections_to_peer_final", [])
+        )
+        log_supervisor(
+            f"{prefix} preferred_base={parsed.get('preferred_base', '')} "
+            f"approve_self={parsed.get('approve_self_as_final', False)} "
+            f"approve_peer={parsed.get('approve_peer_as_final', False)} "
+            f"blockers={blockers}"
+        )
+        return
+    if schema is EXECUTION_SCHEMA:
+        log_supervisor(
+            f"{prefix} summary=\"{clip_text(str(parsed.get('summary', '')))}\" "
+            f"changed_files={len(parsed.get('changed_files', []))} "
+            f"tests={len(parsed.get('tests', []))} "
+            f"remaining_risks={len(parsed.get('remaining_risks', []))}"
+        )
 
 
 def format_cmd_display(cmd: list[str], *, max_arg_length: int = 160) -> str:
@@ -357,6 +533,11 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=DEFAULT_AGENT_TIMEOUT_SECONDS,
         help=f"Maximum seconds to wait for each Claude/Codex stage. Use 0 to disable. Default: {DEFAULT_AGENT_TIMEOUT_SECONDS}.",
+    )
+    parser.add_argument(
+        "--supervise",
+        action="store_true",
+        help="Stream Claude/Codex output to the terminal and write prefixed verbose logs without changing the protocol.",
     )
     parser.add_argument(
         "--cleanup-workspaces",
@@ -1035,6 +1216,7 @@ def assert_workspace_unchanged(
 
 def run_claude(
     prompt: str,
+    phase: str,
     workspace: Path,
     shared_dirs: list[Path],
     schema: dict[str, Any],
@@ -1042,11 +1224,13 @@ def run_claude(
     model: str | None,
     bare: bool,
     timeout: int | None,
+    supervise: bool,
 ) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     prompt_path = output_dir / "prompt.txt"
     stdout_path = output_dir / "stdout.txt"
     stderr_path = output_dir / "stderr.txt"
+    verbose_path = output_dir / "verbose.log"
     parsed_path = output_dir / "parsed.json"
     write_text(prompt_path, prompt)
     cmd = [
@@ -1067,9 +1251,22 @@ def run_claude(
     if model:
         cmd.extend(["--model", model])
     cmd.append(prompt)
-    proc = run_cmd(cmd, cwd=workspace, check=False, timeout=timeout)
-    write_text(stdout_path, proc.stdout)
-    write_text(stderr_path, proc.stderr)
+    if supervise:
+        proc = stream_subprocess(
+            cmd,
+            cwd=workspace,
+            input_text=None,
+            timeout=timeout,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+            verbose_path=verbose_path,
+            agent="claude",
+            phase=phase,
+        )
+    else:
+        proc = run_cmd(cmd, cwd=workspace, check=False, timeout=timeout)
+        write_text(stdout_path, proc.stdout)
+        write_text(stderr_path, proc.stderr)
     if proc.returncode != 0:
         raise RuntimeError(f"Claude failed in {workspace}.\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}")
     parsed = read_json_loose(proc.stdout)
@@ -1078,6 +1275,7 @@ def run_claude(
         "prompt_path": prompt_path,
         "stdout_path": stdout_path,
         "stderr_path": stderr_path,
+        "verbose_path": verbose_path,
         "parsed_path": parsed_path,
         "parsed": parsed,
     }
@@ -1085,6 +1283,7 @@ def run_claude(
 
 def run_codex(
     prompt: str,
+    phase: str,
     workspace: Path,
     shared_dirs: list[Path],
     schema: dict[str, Any],
@@ -1092,11 +1291,13 @@ def run_codex(
     model: str | None,
     writable: bool,
     timeout: int | None,
+    supervise: bool,
 ) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     prompt_path = output_dir / "prompt.txt"
     stdout_path = output_dir / "stdout.txt"
     stderr_path = output_dir / "stderr.txt"
+    verbose_path = output_dir / "verbose.log"
     parsed_path = output_dir / "parsed.json"
     schema_path = output_dir / "schema.json"
     last_message_path = output_dir / "last-message.txt"
@@ -1124,9 +1325,22 @@ def run_codex(
     if model:
         cmd.extend(["-m", model])
     cmd.append("-")
-    proc = run_cmd(cmd, cwd=workspace, input_text=prompt, check=False, timeout=timeout)
-    write_text(stdout_path, proc.stdout)
-    write_text(stderr_path, proc.stderr)
+    if supervise:
+        proc = stream_subprocess(
+            cmd,
+            cwd=workspace,
+            input_text=prompt,
+            timeout=timeout,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+            verbose_path=verbose_path,
+            agent="codex",
+            phase=phase,
+        )
+    else:
+        proc = run_cmd(cmd, cwd=workspace, input_text=prompt, check=False, timeout=timeout)
+        write_text(stdout_path, proc.stdout)
+        write_text(stderr_path, proc.stderr)
     if proc.returncode != 0:
         raise RuntimeError(f"Codex failed in {workspace}.\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}")
     parsed_text = last_message_path.read_text(encoding="utf-8")
@@ -1136,6 +1350,7 @@ def run_codex(
         "prompt_path": prompt_path,
         "stdout_path": stdout_path,
         "stderr_path": stderr_path,
+        "verbose_path": verbose_path,
         "parsed_path": parsed_path,
         "parsed": parsed,
     }
@@ -1156,6 +1371,7 @@ def run_agent_stage(
     codex_model: str | None,
     claude_bare: bool,
     agent_timeout: int | None,
+    supervise: bool,
     read_only: bool,
 ) -> StageRun:
     mode_label = "read-only" if read_only else "write"
@@ -1173,6 +1389,7 @@ def run_agent_stage(
         if agent == "claude":
             result = run_claude(
                 prompt,
+                phase,
                 workspace,
                 shared_dirs,
                 schema,
@@ -1180,10 +1397,12 @@ def run_agent_stage(
                 claude_model,
                 claude_bare,
                 agent_timeout,
+                supervise,
             )
         elif agent == "codex":
             result = run_codex(
                 prompt,
+                phase,
                 workspace,
                 shared_dirs,
                 schema,
@@ -1191,6 +1410,7 @@ def run_agent_stage(
                 codex_model,
                 not read_only,
                 agent_timeout,
+                supervise,
             )
         else:
             raise ValueError(agent)
@@ -1221,6 +1441,8 @@ def run_agent_stage(
         )
         duration = format_duration(duration_seconds)
         log_progress(f"{phase}: {agent} completed in {duration}")
+        if supervise:
+            emit_stage_summary(agent, phase, schema, result["parsed"])
         return StageRun(
             agent=agent,
             phase=phase,
@@ -1228,6 +1450,7 @@ def run_agent_stage(
             prompt_path=result["prompt_path"],
             stdout_path=result["stdout_path"],
             stderr_path=result["stderr_path"],
+            verbose_path=result["verbose_path"],
             parsed_path=result["parsed_path"],
             parsed=result["parsed"],
             changed_files=changed_files,
@@ -1359,6 +1582,7 @@ def markdown_report(data: dict[str, Any]) -> str:
             f"- Status: `{status}`",
             f"- Failed phase: `{data.get('failed_phase', 'unknown')}`",
             f"- Exit code: `{data.get('exit_code', 1)}`",
+            f"- Supervised: `{data.get('supervised', False)}`",
             "",
             "## Error",
             data.get("error", "Unknown error."),
@@ -1366,6 +1590,7 @@ def markdown_report(data: dict[str, Any]) -> str:
             "## Artifacts",
             f"- Run dir: `{data['run_dir']}`",
             f"- Progress log: `{data.get('progress_log', '')}`",
+            f"- Supervisor log: `{data.get('supervisor_log', '')}`",
             f"- Report file: `{Path(data['run_dir']) / 'report.json'}`",
             f"- Traceback file: `{data.get('traceback_file', '')}`",
         ]
@@ -1378,6 +1603,7 @@ def markdown_report(data: dict[str, Any]) -> str:
         f"- Task: {data['task'].strip()}",
         f"- Status: `{status}`",
         f"- Exit code: `{data.get('exit_code', 0 if data.get('final_approved') else 2)}`",
+        f"- Supervised: `{data.get('supervised', False)}`",
         f"- Final plan base: `{data['final_plan_base']}`",
         f"- Executor: `{data['executor']}`",
         f"- Reviewer: `{data['reviewer']}`",
@@ -1400,6 +1626,7 @@ def markdown_report(data: dict[str, Any]) -> str:
             "## Artifacts",
             f"- Run dir: `{data['run_dir']}`",
             f"- Progress log: `{data.get('progress_log', '')}`",
+            f"- Supervisor log: `{data.get('supervisor_log', '')}`",
             f"- Final plan file: `{data['final_plan_file']}`",
             f"- Final package: `{data['final_package']}`",
         ]
@@ -1419,7 +1646,8 @@ def main() -> int:
     run_dir = run_root / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
     progress_log_path = run_dir / "progress.log"
-    initialize_run_state(progress_log_path)
+    supervisor_log_path = run_dir / "supervisor.log" if args.supervise else None
+    initialize_run_state(progress_log_path, supervisor_log_path)
     log_progress(
         f"Run {run_id} started for {repo}; artifacts: {run_dir}; agent-timeout={format_timeout(agent_timeout)}"
     )
@@ -1436,6 +1664,7 @@ def main() -> int:
             "codex_model": args.codex_model,
             "review_rounds": args.review_rounds,
             "agent_timeout_seconds": args.agent_timeout_seconds,
+            "supervise": args.supervise,
             "apply_final": args.apply_final,
             "cleanup_workspaces": args.cleanup_workspaces,
             "keep_workspaces": args.keep_workspaces,
@@ -1456,6 +1685,7 @@ def main() -> int:
             "codex_model": args.codex_model,
             "claude_bare": not args.no_claude_bare,
             "agent_timeout": agent_timeout,
+            "supervise": args.supervise,
         }
 
         current_phase = "plan-consensus"
@@ -1749,7 +1979,9 @@ def main() -> int:
             "run_dir": str(run_dir),
             "status": "completed",
             "exit_code": 0 if final_approved else 2,
+            "supervised": args.supervise,
             "progress_log": str(progress_log_path),
+            "supervisor_log": str(supervisor_log_path) if supervisor_log_path else "",
             "stage_timings": snapshot_stage_timings(),
             "final_plan_base": final_plan_base,
             "executor": final_plan_base,
@@ -1775,7 +2007,9 @@ def main() -> int:
             "run_dir": str(run_dir),
             "status": "failed",
             "exit_code": 1,
+            "supervised": args.supervise,
             "progress_log": str(progress_log_path),
+            "supervisor_log": str(supervisor_log_path) if supervisor_log_path else "",
             "stage_timings": snapshot_stage_timings(),
             "failed_phase": current_phase,
             "error_type": type(exc).__name__,
