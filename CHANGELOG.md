@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+Nothing yet.
+
+## v0.10.0 - 2026-03-29
+
 Live tmux supervision and persistent plan sessions.
 
 - Added `peer-forge-live`, a separate tmux-based live workflow with long-lived Claude and Codex interactive sessions.
