@@ -107,6 +107,7 @@ require_path "$REPO_ROOT/peer-forge-upgrade/SKILL.md"
 require_path "$REPO_ROOT/tools/peer_consensus.py"
 require_path "$REPO_ROOT/bin/peer-forge"
 require_path "$REPO_ROOT/bin/peer-consensus"
+require_path "$REPO_ROOT/bin/peer-forge-upgrade"
 
 echo "Checking dependencies..."
 check_bin claude
@@ -151,6 +152,7 @@ $(print_skill_paths)
 CLI:
 - $REPO_ROOT/bin/peer-forge
 - $REPO_ROOT/bin/peer-consensus
+- $REPO_ROOT/bin/peer-forge-upgrade
 
 Usage in Claude Code:
 - /peer-forge 你的任务描述
@@ -168,6 +170,7 @@ $(print_skill_paths)
 CLI:
 - $REPO_ROOT/bin/peer-forge
 - $REPO_ROOT/bin/peer-consensus
+- $REPO_ROOT/bin/peer-forge-upgrade
 
 Usage in Claude Code:
 $(print_skill_commands)

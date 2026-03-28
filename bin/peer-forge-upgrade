@@ -1,0 +1,157 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage:
+  peer-forge-upgrade [--check]
+
+Options:
+  --check   Fetch remote refs and report whether an upgrade is available, but do not modify the checkout.
+  -h, --help
+
+Notes:
+  - The script upgrades the peer-forge checkout that contains this script.
+  - It requires a clean git worktree.
+  - After upgrading, it re-runs setup to refresh sibling skill links.
+EOF
+}
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "$script_dir/.." && pwd)"
+check_only=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --check)
+      check_only=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "ERROR: unknown argument: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
+
+if ! git -C "$repo_root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  echo "ERROR: $repo_root is not a git checkout." >&2
+  exit 1
+fi
+
+if ! git -C "$repo_root" remote get-url origin >/dev/null 2>&1; then
+  echo "ERROR: git remote 'origin' is not configured for $repo_root." >&2
+  exit 1
+fi
+
+branch="$(git -C "$repo_root" branch --show-current)"
+if [[ -z "$branch" ]]; then
+  echo "ERROR: detached HEAD detected in $repo_root. Check out a branch before upgrading." >&2
+  exit 1
+fi
+
+if ! git -C "$repo_root" diff --quiet || ! git -C "$repo_root" diff --cached --quiet; then
+  echo "ERROR: local tracked changes detected in $repo_root. Commit or stash them before upgrading." >&2
+  exit 1
+fi
+
+if [[ -n "$(git -C "$repo_root" ls-files --others --exclude-standard)" ]]; then
+  echo "ERROR: untracked files detected in $repo_root. Clean them up before upgrading." >&2
+  exit 1
+fi
+
+before_commit="$(git -C "$repo_root" rev-parse --short HEAD)"
+before_version="$(tr -d '\n' <"$repo_root/VERSION" 2>/dev/null || echo "unknown")"
+
+git -C "$repo_root" fetch --tags origin
+
+upstream="$(git -C "$repo_root" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || true)"
+if [[ -z "$upstream" ]]; then
+  upstream="origin/$branch"
+fi
+
+target_commit="$(git -C "$repo_root" rev-parse --short "$upstream")"
+head_can_fast_forward=0
+upstream_is_ancestor=0
+
+if git -C "$repo_root" merge-base --is-ancestor HEAD "$upstream"; then
+  head_can_fast_forward=1
+fi
+
+if git -C "$repo_root" merge-base --is-ancestor "$upstream" HEAD; then
+  upstream_is_ancestor=1
+fi
+
+if [[ "$check_only" -eq 1 ]]; then
+  if [[ "$before_commit" == "$target_commit" ]]; then
+    echo "peer-forge is already up to date:"
+    echo "  repo:    $repo_root"
+    echo "  current: $before_version ($before_commit)"
+  elif [[ "$head_can_fast_forward" -eq 1 ]]; then
+    echo "Upgrade available:"
+    echo "  repo:    $repo_root"
+    echo "  current: $before_version ($before_commit)"
+    echo "  target:  $upstream ($target_commit)"
+  elif [[ "$upstream_is_ancestor" -eq 1 ]]; then
+    echo "Local checkout is ahead of upstream:"
+    echo "  repo:    $repo_root"
+    echo "  current: $before_version ($before_commit)"
+    echo "  upstream: $upstream ($target_commit)"
+  else
+    echo "Local checkout has diverged from upstream:"
+    echo "  repo:    $repo_root"
+    echo "  current: $before_version ($before_commit)"
+    echo "  upstream: $upstream ($target_commit)"
+  fi
+  exit 0
+fi
+
+setup_args=()
+global_root="$HOME/.claude/skills/$(basename "$repo_root")"
+if [[ "$repo_root" != "$global_root" ]]; then
+  setup_args+=(--local)
+fi
+
+did_update=0
+if [[ "$before_commit" != "$target_commit" ]]; then
+  if [[ "$head_can_fast_forward" -ne 1 ]]; then
+    echo "ERROR: cannot fast-forward $repo_root to $upstream." >&2
+    if [[ "$upstream_is_ancestor" -eq 1 ]]; then
+      echo "  The local checkout is ahead of upstream. Inspect the local commits before upgrading." >&2
+    else
+      echo "  The local checkout has diverged from upstream. Resolve the branch state manually first." >&2
+    fi
+    exit 1
+  fi
+  git -C "$repo_root" merge --ff-only "$upstream"
+  did_update=1
+fi
+
+if [[ "${#setup_args[@]}" -gt 0 ]]; then
+  "$repo_root/setup" "${setup_args[@]}"
+else
+  "$repo_root/setup"
+fi
+
+after_commit="$(git -C "$repo_root" rev-parse --short HEAD)"
+after_version="$(tr -d '\n' <"$repo_root/VERSION" 2>/dev/null || echo "unknown")"
+
+if [[ "$did_update" -eq 1 ]]; then
+  echo
+  echo "peer-forge upgraded successfully."
+else
+  echo
+  echo "peer-forge was already current; setup was re-run."
+fi
+
+echo "  repo:    $repo_root"
+echo "  before:  $before_version ($before_commit)"
+echo "  after:   $after_version ($after_commit)"
+echo "  branch:  $branch"
+echo "  source:  $upstream"
+echo "Restart Claude Code if it is already open so the refreshed skills reload."

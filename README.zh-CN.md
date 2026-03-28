@@ -17,7 +17,7 @@
 - 作为 Claude Code 的技能包直接安装
 - 作为独立 CLI 仓库直接运行
 
-当前版本：`v0.6.0`
+当前版本：`v0.7.0`
 
 ## 目录结构
 
@@ -36,7 +36,8 @@ peer-forge/
 │   └── peer_consensus.py
 ├── bin/
 │   ├── peer-forge
-│   └── peer-consensus
+│   ├── peer-consensus
+│   └── peer-forge-upgrade
 ├── setup
 ├── uninstall
 ├── README.md
@@ -97,6 +98,18 @@ git clone git@github.com:andrewbai/peer-forge.git .claude/skills/peer-forge
   --repo . \
   --task "实现这次需求改动。" \
   --apply-final
+```
+
+升级已安装的 checkout：
+
+```bash
+~/.claude/skills/peer-forge/bin/peer-forge-upgrade
+```
+
+只检查是否有新版本，不真正升级：
+
+```bash
+~/.claude/skills/peer-forge/bin/peer-forge-upgrade --check
 ```
 
 ## 环境要求
@@ -188,7 +201,7 @@ git --version
 
 ### `peer-forge-upgrade`
 
-这是一个自升级 skill，用来更新已经安装好的 `peer-forge` 并重新执行 `setup`。
+这是一个自升级 skill，用来通过仓库自带的升级脚本更新已经安装好的 `peer-forge` 并重新执行 `setup`。
 
 ## 备注
 

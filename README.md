@@ -14,7 +14,7 @@ Standalone toolkit for running a dual-agent coding workflow with Claude Code and
 
 This repo is designed to install cleanly as a Claude Code skill pack while still exposing a direct CLI launcher.
 
-Current version: `v0.6.0`
+Current version: `v0.7.0`
 
 ## Structure
 
@@ -33,7 +33,8 @@ peer-forge/
 │   └── peer_consensus.py
 ├── bin/
 │   ├── peer-forge
-│   └── peer-consensus
+│   ├── peer-consensus
+│   └── peer-forge-upgrade
 ├── setup
 ├── uninstall
 ├── README.md
@@ -94,6 +95,18 @@ Project-local vendoring:
   --repo . \
   --task "Implement the change." \
   --apply-final
+```
+
+Upgrade the installed checkout:
+
+```bash
+~/.claude/skills/peer-forge/bin/peer-forge-upgrade
+```
+
+Check whether an upgrade is available without modifying the checkout:
+
+```bash
+~/.claude/skills/peer-forge/bin/peer-forge-upgrade --check
 ```
 
 ## Requirements
@@ -171,7 +184,7 @@ Smaller helper for Claude-driven headless Codex collaboration on a bounded file.
 
 ### `peer-forge-upgrade`
 
-Self-upgrade helper for refreshing the installed `peer-forge` checkout and re-running `setup`.
+Self-upgrade helper for refreshing the installed `peer-forge` checkout through the packaged upgrade script and re-running `setup`.
 
 ## Notes
 

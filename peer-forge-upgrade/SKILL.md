@@ -2,7 +2,8 @@
 name: peer-forge-upgrade
 description: |
   Upgrade the installed Peer Forge skill pack in place. Use when the user wants to update
-  their global Claude Code install, or a vendored project-local install, to the latest git revision.
+  their global Claude Code install, or a vendored project-local install, using the packaged
+  upgrade script instead of hand-written git commands.
 ---
 
 # peer-forge-upgrade
@@ -15,26 +16,30 @@ Use this skill when the user says things like:
 
 ## Default Rule
 
-Default to upgrading the global install at `~/.claude/skills/peer-forge`.
+Default to upgrading the global install at `~/.claude/skills/peer-forge/bin/peer-forge-upgrade`.
 
 If the user explicitly says to upgrade the vendored copy inside the current project, use the local path instead:
 
-- `./.claude/skills/peer-forge`
+- `./.claude/skills/peer-forge/bin/peer-forge-upgrade`
 
 If the global install path does not exist but the current project has a vendored install, upgrade the vendored install instead of failing immediately.
 
 ## Global Upgrade
 
 ```bash
-git -C ~/.claude/skills/peer-forge pull --ff-only
-~/.claude/skills/peer-forge/setup
+~/.claude/skills/peer-forge/bin/peer-forge-upgrade
 ```
 
 ## Project-Local Upgrade
 
 ```bash
-git -C ./.claude/skills/peer-forge pull --ff-only
-./.claude/skills/peer-forge/setup --local
+./.claude/skills/peer-forge/bin/peer-forge-upgrade
+```
+
+## Check Without Upgrading
+
+```bash
+~/.claude/skills/peer-forge/bin/peer-forge-upgrade --check
 ```
 
 ## What To Report

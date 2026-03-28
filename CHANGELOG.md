@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.7.0 - 2026-03-28
+
+Script-backed upgrade flow.
+
+- Added `bin/peer-forge-upgrade` as the real upgrade engine behind the self-upgrade skill.
+- Switched `peer-forge-upgrade` to call the packaged upgrade script instead of embedding raw git commands in the skill doc.
+- Added `--check` mode to the upgrade script so users can see whether an update is available without modifying the checkout.
+- Made `setup` validate and advertise the new CLI upgrade script alongside the existing launchers.
+
 ## v0.6.0 - 2026-03-28
 
 Self-upgrade skill and dynamic skill registration output.
