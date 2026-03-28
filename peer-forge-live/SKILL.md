@@ -3,7 +3,7 @@ name: peer-forge-live
 description: |
   Run the live tmux-based Peer Forge workflow when the user wants to watch Claude Code and Codex
   side by side in long-lived interactive sessions, supervise the process in real time, and keep the
-  two agents symmetric and isolated. This v1 mode is plan-only.
+  two agents symmetric and isolated across planning, execution, review, and signoff.
 ---
 
 # peer-forge-live
@@ -17,11 +17,22 @@ Use this skill when the user wants:
 This is the live counterpart to `peer-consensus`.
 
 Current scope:
-- plan-only
-- no code writing
-- no apply-final
+- full plan -> execute -> review -> signoff workflow
+- no apply-final into the user's main repo
 - no asymmetric supervisor notes
 - protocol automation after startup, but CLI-native safety/trust prompts remain manual on purpose
+- protocol-level read-only enforcement on non-write phases
+
+Phase order:
+- independent plans
+- cross-review
+- revision
+- consensus
+- final plan
+- plan signoff
+- selected-side execution
+- peer implementation review
+- bounded execution fix/signoff rounds
 
 ## Requirements
 
@@ -103,5 +114,4 @@ Rules:
 Use `peer-consensus` instead when the user wants:
 - headless repeatable CLI runs
 - structured JSON-only batch artifacts
-- execution plus implementation review
 - CI-friendly automation instead of live supervision

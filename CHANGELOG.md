@@ -9,6 +9,14 @@ Live startup behavior clarified and hardened.
 - Kept live Codex startup on the interactive CLI path and documented that workspace trust remains a manual confirmation point there.
 - Updated the English README, Chinese README, and `peer-forge-live` skill docs to document the expected manual confirmation points instead of pretending they are fully unattended.
 
+Live workflow expanded beyond plan-only.
+
+- Added execution-phase schemas and prompt builders for live execution, implementation review, execution fixes, and implementation signoff.
+- Extended `peer-forge-live` to continue from approved plan consensus into selected-side execution, peer review, package collection, and bounded fix/signoff rounds.
+- Switched live Codex sessions to a write-capable sandbox and enforced non-write phases at the protocol layer with read-only workspace snapshots and violation reporting.
+- Added live execution package records plus richer report fields for selected executor/reviewer, current execution package, and read-only violations.
+- Updated the English README, Chinese README, and `peer-forge-live` skill docs to describe the full live workflow instead of the earlier plan-only scope.
+
 ## v0.10.0 - 2026-03-29
 
 Live tmux supervision and persistent plan sessions.

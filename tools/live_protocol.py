@@ -7,6 +7,7 @@ from typing import Any
 
 from peer_consensus import (
     CONSENSUS_SCHEMA,
+    EXECUTION_SCHEMA,
     FINAL_PLAN_SCHEMA,
     FINDING_SCHEMA,
     PLAN_REVISION_SCHEMA,
@@ -48,6 +49,10 @@ PHASE_PAYLOAD_SCHEMAS: dict[str, dict[str, Any]] = {
     "plan-finalize": FINAL_PLAN_SCHEMA,
     "plan-final-fix": FINAL_PLAN_SCHEMA,
     "plan-signoff": LIVE_SIGNOFF_SCHEMA,
+    "execute-initial": EXECUTION_SCHEMA,
+    "execution-review": REVIEW_SCHEMA,
+    "execution-fix": EXECUTION_SCHEMA,
+    "execution-signoff": LIVE_SIGNOFF_SCHEMA,
 }
 
 RESULT_BLOCK_RE = re.compile(
@@ -61,6 +66,12 @@ def phase_payload_schema(phase: str) -> dict[str, Any]:
         return PHASE_PAYLOAD_SCHEMAS["plan-final-fix"]
     if phase.startswith("plan-signoff"):
         return PHASE_PAYLOAD_SCHEMAS["plan-signoff"]
+    if phase.startswith("execution-review"):
+        return PHASE_PAYLOAD_SCHEMAS["execution-review"]
+    if phase.startswith("execution-fix"):
+        return PHASE_PAYLOAD_SCHEMAS["execution-fix"]
+    if phase.startswith("execution-signoff"):
+        return PHASE_PAYLOAD_SCHEMAS["execution-signoff"]
     try:
         return PHASE_PAYLOAD_SCHEMAS[phase]
     except KeyError as exc:
@@ -98,15 +109,28 @@ def render_supervisor_notes(notes: list[dict[str, Any]] | None) -> str:
     ).strip()
 
 
-def base_phase_guardrails(turn_id: str, phase: str, agent: str, schema: dict[str, Any]) -> str:
+def phase_guardrails(
+    turn_id: str,
+    phase: str,
+    agent: str,
+    schema: dict[str, Any],
+    *,
+    allow_writes: bool,
+) -> str:
+    phase_rule = (
+        "This phase allows code changes, but only inside your own isolated workspace."
+        if allow_writes
+        else "This phase is read-only. Do not modify code, do not run write commands, and do not create commits, branches, or tags."
+    )
     return textwrap.dedent(
         f"""
         Live Protocol:
         - Current turn_id: {turn_id}
         - Current phase: {phase}
         - Current agent field value: {agent}
-        - This live workflow is still plan-only. Do not modify code, do not run write commands, and do not create commits, branches, or tags.
+        - {phase_rule}
         - Stay inside your own isolated workspace only.
+        - Never create commits, branches, or tags.
         - When you are done, output exactly one result envelope using the required markers.
         - The inner `result` object must match this JSON schema exactly:
 
@@ -149,7 +173,7 @@ def build_plan_initial_prompt(
         - Keep scope tight unless expansion is strictly necessary.
         - Focus on plan quality, risks, and verification strategy.
 
-        {base_phase_guardrails(turn_id, phase, agent, schema)}
+        {phase_guardrails(turn_id, phase, agent, schema, allow_writes=False)}
         """
     ).strip()
 
@@ -184,7 +208,7 @@ def build_plan_review_prompt(
         - unrealistic scope
         - weak verification
 
-        {base_phase_guardrails(turn_id, phase, reviewer, schema)}
+        {phase_guardrails(turn_id, phase, reviewer, schema, allow_writes=False)}
         """
     ).strip()
 
@@ -215,7 +239,7 @@ def build_plan_revise_prompt(
         - Keep useful strengths from your original plan.
         - Keep the plan concrete and directly executable.
 
-        {base_phase_guardrails(turn_id, phase, agent, schema)}
+        {phase_guardrails(turn_id, phase, agent, schema, allow_writes=False)}
         """
     ).strip()
 
@@ -250,7 +274,7 @@ def build_plan_consensus_prompt(
         - what must be preserved from each side
         - what blockers remain against either candidate
 
-        {base_phase_guardrails(turn_id, phase, agent, schema)}
+        {phase_guardrails(turn_id, phase, agent, schema, allow_writes=False)}
         """
     ).strip()
 
@@ -286,7 +310,7 @@ def build_plan_finalize_prompt(
 
         Produce the best final candidate that preserves valid strengths from both sides and resolves blockers where possible.
 
-        {base_phase_guardrails(turn_id, phase, agent, schema)}
+        {phase_guardrails(turn_id, phase, agent, schema, allow_writes=False)}
         """
     ).strip()
 
@@ -317,7 +341,7 @@ def build_plan_signoff_prompt(
         - List blockers as structured findings.
         - If you reject, clearly state what must be preserved in the next revision.
 
-        {base_phase_guardrails(turn_id, phase, agent, schema)}
+        {phase_guardrails(turn_id, phase, agent, schema, allow_writes=False)}
         """
     ).strip()
 
@@ -351,7 +375,170 @@ def build_final_fix_prompt(
         - Preserve strengths explicitly called out by the reviewers.
         - Keep the final candidate internally consistent.
 
-        {base_phase_guardrails(turn_id, phase, agent, schema)}
+        {phase_guardrails(turn_id, phase, agent, schema, allow_writes=False)}
+        """
+    ).strip()
+
+
+def build_execution_prompt(
+    *,
+    turn_id: str,
+    phase: str,
+    agent: str,
+    agent_name: str,
+    task: str,
+    acceptance: list[str],
+    scope: list[str],
+    final_plan: dict[str, Any],
+    supervisor_notes: list[dict[str, Any]] | None = None,
+) -> str:
+    schema = phase_payload_schema(phase)
+    notes_block = render_supervisor_notes(supervisor_notes)
+    return textwrap.dedent(
+        f"""
+        You are {agent_name} executing the agreed final plan in Peer Forge Live.
+
+        This is the code-writing phase. Modify code only inside this isolated workspace.
+
+        {prompt_header(task, acceptance, scope)}
+
+        {notes_block}
+
+        Final plan:
+        {json.dumps(final_plan, indent=2, ensure_ascii=True)}
+
+        Execution rules:
+        - Follow the final plan closely.
+        - Keep changes minimal and coherent.
+        - If reality differs from the plan, adapt pragmatically and explain why.
+        - Run targeted verification if it is cheap and local.
+
+        {phase_guardrails(turn_id, phase, agent, schema, allow_writes=True)}
+        """
+    ).strip()
+
+
+def build_execution_review_prompt(
+    *,
+    turn_id: str,
+    phase: str,
+    agent: str,
+    reviewer_name: str,
+    executor_name: str,
+    final_plan: dict[str, Any],
+    execution_summary: dict[str, Any],
+    execution_package_dir: str,
+    supervisor_notes: list[dict[str, Any]] | None = None,
+) -> str:
+    schema = phase_payload_schema(phase)
+    notes_block = render_supervisor_notes(supervisor_notes)
+    return textwrap.dedent(
+        f"""
+        You are {reviewer_name} reviewing {executor_name}'s implementation against the agreed final plan.
+
+        Review only. Do not modify your workspace.
+
+        {notes_block}
+
+        Final plan:
+        {json.dumps(final_plan, indent=2, ensure_ascii=True)}
+
+        Execution summary:
+        {json.dumps(execution_summary, indent=2, ensure_ascii=True)}
+
+        Implementation artifacts:
+        - Diff: {execution_package_dir}/solution.diff
+        - Manifest: {execution_package_dir}/manifest.json
+        - Changed file copies root: {execution_package_dir}/files
+
+        Review standard:
+        - adherence to the final plan
+        - correctness
+        - regressions
+        - edge cases
+        - missing tests
+
+        {phase_guardrails(turn_id, phase, agent, schema, allow_writes=False)}
+        """
+    ).strip()
+
+
+def build_execution_fix_prompt(
+    *,
+    turn_id: str,
+    phase: str,
+    agent: str,
+    agent_name: str,
+    task: str,
+    acceptance: list[str],
+    scope: list[str],
+    final_plan: dict[str, Any],
+    review_feedback: dict[str, Any],
+    supervisor_notes: list[dict[str, Any]] | None = None,
+) -> str:
+    schema = phase_payload_schema(phase)
+    notes_block = render_supervisor_notes(supervisor_notes)
+    return textwrap.dedent(
+        f"""
+        You are {agent_name} updating the implementation after peer review.
+
+        {prompt_header(task, acceptance, scope)}
+
+        {notes_block}
+
+        Final plan:
+        {json.dumps(final_plan, indent=2, ensure_ascii=True)}
+
+        Review feedback:
+        {json.dumps(review_feedback, indent=2, ensure_ascii=True)}
+
+        Fix rules:
+        - Address valid review findings.
+        - Keep the implementation aligned with the final plan.
+        - Keep the diff focused.
+
+        {phase_guardrails(turn_id, phase, agent, schema, allow_writes=True)}
+        """
+    ).strip()
+
+
+def build_execution_signoff_prompt(
+    *,
+    turn_id: str,
+    phase: str,
+    agent: str,
+    agent_name: str,
+    final_plan: dict[str, Any],
+    execution_summary: dict[str, Any],
+    execution_package_dir: str,
+    supervisor_notes: list[dict[str, Any]] | None = None,
+) -> str:
+    schema = phase_payload_schema(phase)
+    notes_block = render_supervisor_notes(supervisor_notes)
+    return textwrap.dedent(
+        f"""
+        You are {agent_name} signing off on the current implementation candidate.
+
+        {notes_block}
+
+        Final plan:
+        {json.dumps(final_plan, indent=2, ensure_ascii=True)}
+
+        Execution summary:
+        {json.dumps(execution_summary, indent=2, ensure_ascii=True)}
+
+        Implementation artifacts:
+        - Diff: {execution_package_dir}/solution.diff
+        - Manifest: {execution_package_dir}/manifest.json
+        - Changed file copies root: {execution_package_dir}/files
+
+        Signoff rules:
+        - Approve only if this implementation is acceptable as the final agreed result.
+        - Reject only for substantive blockers.
+        - List blockers as structured findings.
+        - If you reject, clearly state what must be preserved in the next revision.
+
+        {phase_guardrails(turn_id, phase, agent, schema, allow_writes=False)}
         """
     ).strip()
 

@@ -187,11 +187,23 @@ git --version
 
 当前 live 范围：
 
-- 只做 plan，不写代码
+- 覆盖完整的 plan -> execute -> review -> signoff 流程
 - Claude 和 Codex 都是长生命周期 session
 - 用 tmux 分 pane 同时看 Claude、Codex、supervisor
 - 只允许对称 supervisor note
-- 还没有实现 execution 阶段
+- 非写阶段由协议层强制做只读校验
+
+当前 live 阶段顺序：
+
+1. 双方独立出方案
+2. 交叉 review
+3. 各自修订
+4. 共识选 base
+5. 产出最终方案
+6. 方案 signoff
+7. 选中的一方执行代码
+8. 另一方 review 实现结果
+9. 有限轮次的 execution fix/signoff
 
 启动说明：
 
@@ -297,6 +309,7 @@ supervisor pane 里的主要命令：
 - 你想并排看两个交互式 session
 - 你想实时监督它们的过程
 - 你想保留 session memory，而不是每个阶段都冷启动
+- 你想把方案、执行、review、signoff 都放在同一轮 live 协议里
 
 ### `codex-collab`
 

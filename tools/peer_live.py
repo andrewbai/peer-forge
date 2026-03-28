@@ -13,6 +13,10 @@ import uuid
 from typing import Any
 
 from live_protocol import (
+    build_execution_fix_prompt,
+    build_execution_prompt,
+    build_execution_review_prompt,
+    build_execution_signoff_prompt,
     build_final_fix_prompt,
     build_plan_consensus_prompt,
     build_plan_finalize_prompt,
@@ -42,10 +46,12 @@ from peer_consensus import (
     build_merge_brief,
     choose_final_base,
     clip_text,
+    collect_package,
     ensure_cli,
     normalize_findings,
     prepare_workspaces,
     read_task,
+    snapshot_workspace_state,
     unique_lines,
     utc_now,
     utc_timestamp_precise,
@@ -79,7 +85,7 @@ def parse_args() -> argparse.Namespace:
 
 def parse_start_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Start a live, tmux-based Peer Forge plan consensus run with interactive Claude and Codex sessions.",
+        description="Start a live, tmux-based Peer Forge run with interactive Claude and Codex sessions.",
     )
     parser.add_argument("--repo", default=".", help="Repository or workspace root. Defaults to the current directory.")
     task_group = parser.add_mutually_exclusive_group()
@@ -220,6 +226,12 @@ def phase_label(phase: str) -> str:
         return "plan-signoff"
     if phase.startswith("plan-final-fix"):
         return "plan-final-fix"
+    if phase.startswith("execution-review"):
+        return "execution-review"
+    if phase.startswith("execution-signoff"):
+        return "execution-signoff"
+    if phase.startswith("execution-fix"):
+        return "execution-fix"
     return phase
 
 
@@ -232,6 +244,10 @@ def phase_summary_text(phase: str) -> str:
         "plan-finalize": "Plan 5/6: base side writes the merged final plan candidate",
         "plan-signoff": "Plan 6/6: both sides sign off on the final plan candidate",
         "plan-final-fix": "Plan 6b: base side revises the final candidate after signoff objections",
+        "execute-initial": "Execute 1/4: chosen side implements the final plan",
+        "execution-review": "Execute 2/4: peer reviews the implementation package",
+        "execution-fix": "Execute 3/4: executor revises after implementation review",
+        "execution-signoff": "Execute 4/4: both sides sign off on the implementation candidate",
     }
     return labels.get(phase_label(phase), phase)
 
@@ -259,6 +275,10 @@ def raw_log_path(state: dict[str, Any], agent: str) -> Path:
     return Path(state["agents"][agent]["raw_log_path"])
 
 
+def git_mode(state: dict[str, Any]) -> bool:
+    return bool(state.get("workspaces", {}).get("git_mode", False))
+
+
 def read_file_tail(path: Path, lines: int = 40) -> str:
     if not path.exists():
         return "(missing)"
@@ -283,6 +303,65 @@ def append_combined_verbose(state: dict[str, Any], agent: str, text: str) -> Non
         rendered.append(f"[{timestamp}][{agent}] {line}")
     if rendered:
         append_text(verbose_path, "\n".join(rendered) + "\n")
+
+
+def capture_read_only_snapshot(state: dict[str, Any], turn: dict[str, Any], agent: str) -> None:
+    turn_agent = turn["agents"][agent]
+    if not turn_agent["active"] or not turn_agent["read_only"]:
+        return
+    workspace = Path(state["agents"][agent]["workspace"])
+    status, diff = snapshot_workspace_state(workspace, git_mode(state))
+    write_text(Path(turn_agent["entry_snapshot_status_path"]), status)
+    write_text(Path(turn_agent["entry_snapshot_diff_path"]), diff)
+    turn_agent["entry_snapshot_taken_at"] = utc_timestamp_precise()
+
+
+def read_only_violation_record_path(state: dict[str, Any], turn: dict[str, Any], agent: str) -> Path:
+    return Path(state["run_dir"]) / "read-only-violations" / f"{turn['id']}-{agent}.json"
+
+
+def validate_read_only_snapshot(state: dict[str, Any], turn: dict[str, Any], agent: str) -> None:
+    turn_agent = turn["agents"][agent]
+    if not turn_agent["active"] or not turn_agent["read_only"]:
+        return
+    before_status = Path(turn_agent["entry_snapshot_status_path"]).read_text(encoding="utf-8")
+    before_diff = Path(turn_agent["entry_snapshot_diff_path"]).read_text(encoding="utf-8")
+    workspace = Path(state["agents"][agent]["workspace"])
+    after_status, after_diff = snapshot_workspace_state(workspace, git_mode(state))
+    if before_status == after_status and before_diff == after_diff:
+        return
+    message = f"{agent} changed its workspace during read-only phase '{turn['phase']}'."
+    record = {
+        "turn_id": turn["id"],
+        "phase": turn["phase"],
+        "agent": agent,
+        "detected_at": utc_timestamp_precise(),
+        "message": message,
+        "workspace": str(workspace),
+        "entry_snapshot_status_path": turn_agent["entry_snapshot_status_path"],
+        "entry_snapshot_diff_path": turn_agent["entry_snapshot_diff_path"],
+        "record_file": str(read_only_violation_record_path(state, turn, agent)),
+    }
+    write_json(Path(record["record_file"]), record)
+    state["read_only_violations"].append(record)
+    turn_agent["read_only_violation"] = record
+    turn_agent["status"] = "failed"
+    turn_agent["parse_error"] = message
+    turn["status"] = "failed"
+    save_state(state)
+    write_supervisor_event(
+        state,
+        {
+            "type": "read-only-violation",
+            "timestamp": utc_timestamp_precise(),
+            "turn_id": turn["id"],
+            "phase": turn["phase"],
+            "agent": agent,
+            "message": message,
+            "record_file": record["record_file"],
+        },
+    )
+    raise RuntimeError(message)
 
 
 def stream_new_agent_output(state: dict[str, Any], agent: str) -> str:
@@ -349,7 +428,7 @@ def read_note_text(initial_text: str | None = None) -> str | None:
 
 def summarize_agent_result(phase: str, payload: dict[str, Any]) -> str:
     family = phase_label(phase)
-    if family == "plan-review":
+    if family in {"plan-review", "execution-review"}:
         findings = payload.get("findings", [])
         top = ""
         if findings:
@@ -367,7 +446,7 @@ def summarize_agent_result(phase: str, payload: dict[str, Any]) -> str:
             f"approve_self={payload.get('approve_self_as_final', False)}, "
             f"approve_peer={payload.get('approve_peer_as_final', False)}, blockers={blockers}"
         )
-    if family == "plan-signoff":
+    if family in {"plan-signoff", "execution-signoff"}:
         return (
             f"verdict={payload.get('overall_verdict', '')}, "
             f"blockers={len(payload.get('blocking_findings', []))}, "
@@ -524,14 +603,24 @@ def prepare_turn(
     phase: str,
     prompt_texts: dict[str, str],
     active_agents: list[str],
+    writable_agents: list[str] | None = None,
 ) -> dict[str, Any]:
     turn_id = turn_id_for(state, phase)
     turn_dir = turn_dir_for(state, turn_id)
+    active_set = set(active_agents)
+    writable_set = set(writable_agents or [])
+    invalid_writers = sorted(writable_set - active_set)
+    if invalid_writers:
+        raise ValueError(f"Writable agents must be active in {phase}: {', '.join(invalid_writers)}")
+    phase_mode = "read-only"
+    if writable_set:
+        phase_mode = "write" if writable_set == active_set else "mixed"
     turn = {
         "id": turn_id,
         "index": len(state["turns"]) + 1,
         "phase": phase,
         "phase_family": phase_label(phase),
+        "mode": phase_mode,
         "summary": phase_summary_text(phase),
         "created_at": utc_timestamp_precise(),
         "started_at": "",
@@ -546,23 +635,31 @@ def prepare_turn(
         session_prompt_path = session_prompt_path_for(state, turn_id, agent)
         result_path = turn_dir / agent / "result.json"
         turn_log_path = turn_dir / agent / "turn.log"
+        entry_snapshot_status_path = turn_dir / agent / "entry-snapshot.status.txt"
+        entry_snapshot_diff_path = turn_dir / agent / "entry-snapshot.diff.txt"
         is_active = agent in active_agents
+        is_read_only = is_active and agent not in writable_set
         if is_active:
             write_text(prompt_path, prompt_texts[agent].strip() + "\n")
             write_text(session_prompt_path, prompt_texts[agent].strip() + "\n")
             write_text(turn_log_path, "")
         turn["agents"][agent] = {
             "active": is_active,
+            "read_only": is_read_only,
             "status": "pending" if is_active else "skipped",
             "prompt_path": str(prompt_path) if is_active else "",
             "session_prompt_path": str(session_prompt_path) if is_active else "",
             "result_path": str(result_path) if is_active else "",
             "turn_log_path": str(turn_log_path) if is_active else "",
+            "entry_snapshot_status_path": str(entry_snapshot_status_path) if is_active and is_read_only else "",
+            "entry_snapshot_diff_path": str(entry_snapshot_diff_path) if is_active and is_read_only else "",
+            "entry_snapshot_taken_at": "",
             "turn_start_offset": raw_path.stat().st_size if raw_path.exists() else 0,
             "parse_error": "",
             "result": None,
             "completed_at": "",
             "nudge_count": 0,
+            "read_only_violation": None,
         }
     state["turns"].append(turn)
     state["current_phase"] = phase
@@ -594,6 +691,7 @@ def dispatch_turn(
             turn_agent["turn_start_offset"] = raw_log_path(state, agent).stat().st_size if raw_log_path(state, agent).exists() else 0
         turn_agent["parse_error"] = ""
         turn_agent["result"] = None
+        capture_read_only_snapshot(state, turn, agent)
         if send_prompts:
             paste_message(
                 state["agents"][agent]["pane_id"],
@@ -650,6 +748,7 @@ def wait_for_turn(
                     turn_agent["parse_error"] = str(exc)
                     save_state(state)
                 continue
+            validate_read_only_snapshot(state, turn, agent)
             turn_agent["status"] = "completed"
             turn_agent["completed_at"] = utc_timestamp_precise()
             turn_agent["parse_error"] = ""
@@ -750,7 +849,9 @@ def build_codex_command(
         "-C",
         str(workspace),
         "-s",
-        "read-only",
+        # Keep the long-lived session write-capable; protocol-level read-only
+        # checks enforce no-write phases.
+        "workspace-write",
         "-a",
         "never",
         "--no-alt-screen",
@@ -791,6 +892,53 @@ def final_candidate_path(state: dict[str, Any]) -> Path:
     return Path(state["run_dir"]) / "final-plan.json"
 
 
+def execution_package_root(state: dict[str, Any]) -> Path:
+    return Path(state["run_dir"]) / "packages"
+
+
+def execution_package_dir_for(state: dict[str, Any], turn_id: str, agent: str) -> Path:
+    return execution_package_root(state) / turn_id / agent
+
+
+def peer_agent(agent: str) -> str:
+    for candidate in AGENTS:
+        if candidate != agent:
+            return candidate
+    raise ValueError(f"No peer agent for {agent}")
+
+
+def collect_execution_package(
+    state: dict[str, Any],
+    *,
+    turn: dict[str, Any],
+    executor: str,
+    execution_summary: dict[str, Any],
+) -> dict[str, Any]:
+    package_dir = execution_package_dir_for(state, turn["id"], executor)
+    changed_files, diff_path = collect_package(
+        Path(state["agents"][executor]["workspace"]),
+        Path(state["workspaces"]["baseline"]),
+        package_dir,
+        git_mode(state),
+    )
+    record = {
+        "turn_id": turn["id"],
+        "phase": turn["phase"],
+        "executor": executor,
+        "created_at": utc_timestamp_precise(),
+        "package_dir": str(package_dir),
+        "manifest_path": str(package_dir / "manifest.json"),
+        "diff_path": str(diff_path),
+        "changed_files": changed_files,
+        "summary": execution_summary,
+    }
+    state["execution_packages"].append(record)
+    state["current_execution_package"] = record
+    state["summary"]["current_execution_package"] = record
+    save_state(state)
+    return record
+
+
 def report_path(state: dict[str, Any]) -> Path:
     return Path(state["run_dir"]) / "report.json"
 
@@ -803,7 +951,7 @@ def build_report(state: dict[str, Any]) -> dict[str, Any]:
     summary = state.get("summary", {})
     return {
         "run_id": state["run_id"],
-        "mode": "peer-forge-live-v1",
+        "mode": "peer-forge-live-v2",
         "repo": state["repo"],
         "task": state["task"],
         "acceptance": state["acceptance"],
@@ -815,23 +963,36 @@ def build_report(state: dict[str, Any]) -> dict[str, Any]:
         "created_at": state["created_at"],
         "updated_at": utc_timestamp_precise(),
         "current_phase": state.get("current_phase", ""),
+        "selected_executor": state.get("selected_executor", ""),
+        "selected_reviewer": state.get("selected_reviewer", ""),
+        "final_plan": state.get("final_plan"),
+        "current_execution_package": state.get("current_execution_package"),
+        "execution_packages": state.get("execution_packages", []),
+        "read_only_violations": state.get("read_only_violations", []),
+        "manual_confirmations_expected": state.get("manual_confirmations_expected", []),
+        "workspaces": state.get("workspaces", {}),
         "logs": state["logs"],
         "notes": state["notes"],
         "turns": [
             {
                 "id": turn["id"],
                 "phase": turn["phase"],
+                "mode": turn.get("mode", ""),
                 "status": turn["status"],
                 "started_at": turn["started_at"],
                 "completed_at": turn["completed_at"],
                 "agents": {
                     agent: {
                         "active": turn["agents"][agent]["active"],
+                        "read_only": turn["agents"][agent]["read_only"],
                         "status": turn["agents"][agent]["status"],
                         "prompt_path": turn["agents"][agent]["prompt_path"],
                         "session_prompt_path": turn["agents"][agent]["session_prompt_path"],
                         "result_path": turn["agents"][agent]["result_path"],
                         "turn_log_path": turn["agents"][agent]["turn_log_path"],
+                        "entry_snapshot_status_path": turn["agents"][agent]["entry_snapshot_status_path"],
+                        "entry_snapshot_diff_path": turn["agents"][agent]["entry_snapshot_diff_path"],
+                        "read_only_violation": turn["agents"][agent]["read_only_violation"],
                     }
                     for agent in AGENTS
                 },
@@ -844,6 +1005,8 @@ def build_report(state: dict[str, Any]) -> dict[str, Any]:
 
 def report_markdown(data: dict[str, Any]) -> str:
     summary = data.get("summary", {})
+    plan_approved = bool(summary.get("plan_approved", False))
+    execution_approved = bool(summary.get("execution_approved", False))
     final_approved = bool(summary.get("final_approved", False))
     lines = [
         f"# Peer Forge Live Run {data['run_id']}",
@@ -852,8 +1015,13 @@ def report_markdown(data: dict[str, Any]) -> str:
         f"- Task: {data['task']}",
         f"- Status: `{data['status']}`",
         f"- Session: `{data['session_name']}`",
+        f"- Plan approved: `{plan_approved}`",
+        f"- Execution approved: `{execution_approved}`",
         f"- Final approved: `{final_approved}`",
         f"- Final plan base: `{summary.get('final_plan_base', '')}`",
+        f"- Selected executor: `{data.get('selected_executor', '')}`",
+        f"- Selected reviewer: `{data.get('selected_reviewer', '')}`",
+        f"- Read-only violations: `{len(data.get('read_only_violations', []))}`",
         f"- Run dir: `{data['run_dir']}`",
         "",
         "## Logs",
@@ -866,6 +1034,12 @@ def report_markdown(data: dict[str, Any]) -> str:
     final_plan_file = summary.get("final_plan_file")
     if final_plan_file:
         lines.append(f"- Final plan: `{final_plan_file}`")
+    current_execution_package = data.get("current_execution_package")
+    if current_execution_package:
+        lines.append(f"- Current execution package: `{current_execution_package.get('package_dir', '')}`")
+    if data.get("manual_confirmations_expected"):
+        lines.extend(["", "## Manual Confirmations"])
+        lines.extend(f"- {item}" for item in data["manual_confirmations_expected"])
     lines.extend(["", "## Notes"])
     if data.get("notes"):
         lines.extend(
@@ -874,9 +1048,17 @@ def report_markdown(data: dict[str, Any]) -> str:
         )
     else:
         lines.append("- None")
+    lines.extend(["", "## Read-Only Violations"])
+    if data.get("read_only_violations"):
+        lines.extend(
+            f"- `{item['turn_id']}` `{item['agent']}`: {item['message']}"
+            for item in data["read_only_violations"]
+        )
+    else:
+        lines.append("- None")
     lines.extend(["", "## Turns"])
     for turn in data.get("turns", []):
-        lines.append(f"- `{turn['id']}` `{turn['status']}`")
+        lines.append(f"- `{turn['id']}` `{turn['mode']}` `{turn['status']}`")
     return "\n".join(lines) + "\n"
 
 
@@ -907,6 +1089,16 @@ def initialize_state(args: argparse.Namespace, *, repo: Path, task: str, run_dir
         "tool_repo_root": str(repo_root()),
         "session_name": session_name,
         "current_phase": "",
+        "selected_executor": "",
+        "selected_reviewer": "",
+        "final_plan": None,
+        "current_execution_package": None,
+        "execution_packages": [],
+        "read_only_violations": [],
+        "manual_confirmations_expected": [
+            "Claude may ask you to confirm entering bypassPermissions mode.",
+            "Codex may ask you to trust the generated workspace before proceeding.",
+        ],
         "notes": [],
         "turns": [],
         "summary": {},
@@ -1129,6 +1321,124 @@ def build_final_fix_turn(
     return prepare_turn(state, phase=phase, prompt_texts=prompt_texts, active_agents=[final_plan_base])
 
 
+def build_execute_turn(state: dict[str, Any], *, executor: str, final_plan: dict[str, Any]) -> dict[str, Any]:
+    turn_index = len(state["turns"]) + 1
+    prompt_texts = {
+        executor: build_execution_prompt(
+            turn_id=turn_id_for(state, "execute-initial"),
+            phase="execute-initial",
+            agent=executor,
+            agent_name=DISPLAY_NAMES[executor],
+            task=state["task"],
+            acceptance=state["acceptance"],
+            scope=state["scope"],
+            final_plan=final_plan,
+            supervisor_notes=active_notes_for_turn(state, turn_index),
+        )
+    }
+    return prepare_turn(
+        state,
+        phase="execute-initial",
+        prompt_texts=prompt_texts,
+        active_agents=[executor],
+        writable_agents=[executor],
+    )
+
+
+def build_execution_review_turn(
+    state: dict[str, Any],
+    *,
+    executor: str,
+    reviewer: str,
+    final_plan: dict[str, Any],
+    execution_summary: dict[str, Any],
+    execution_package: dict[str, Any],
+) -> dict[str, Any]:
+    turn_index = len(state["turns"]) + 1
+    prompt_texts = {
+        reviewer: build_execution_review_prompt(
+            turn_id=turn_id_for(state, "execution-review"),
+            phase="execution-review",
+            agent=reviewer,
+            reviewer_name=DISPLAY_NAMES[reviewer],
+            executor_name=DISPLAY_NAMES[executor],
+            final_plan=final_plan,
+            execution_summary=execution_summary,
+            execution_package_dir=execution_package["package_dir"],
+            supervisor_notes=active_notes_for_turn(state, turn_index),
+        )
+    }
+    return prepare_turn(state, phase="execution-review", prompt_texts=prompt_texts, active_agents=[reviewer])
+
+
+def build_execution_fix_turn(
+    state: dict[str, Any],
+    *,
+    round_index: int,
+    executor: str,
+    final_plan: dict[str, Any],
+    review_feedback: dict[str, Any],
+) -> dict[str, Any]:
+    phase = f"execution-fix-round-{round_index}"
+    turn_index = len(state["turns"]) + 1
+    prompt_texts = {
+        executor: build_execution_fix_prompt(
+            turn_id=turn_id_for(state, phase),
+            phase=phase,
+            agent=executor,
+            agent_name=DISPLAY_NAMES[executor],
+            task=state["task"],
+            acceptance=state["acceptance"],
+            scope=state["scope"],
+            final_plan=final_plan,
+            review_feedback=review_feedback,
+            supervisor_notes=active_notes_for_turn(state, turn_index),
+        )
+    }
+    return prepare_turn(
+        state,
+        phase=phase,
+        prompt_texts=prompt_texts,
+        active_agents=[executor],
+        writable_agents=[executor],
+    )
+
+
+def build_execution_signoff_turn(
+    state: dict[str, Any],
+    *,
+    round_index: int,
+    final_plan: dict[str, Any],
+    execution_summary: dict[str, Any],
+    execution_package: dict[str, Any],
+) -> dict[str, Any]:
+    phase = "execution-signoff" if round_index == 0 else f"execution-signoff-round-{round_index}"
+    turn_index = len(state["turns"]) + 1
+    prompt_texts = {
+        "claude": build_execution_signoff_prompt(
+            turn_id=turn_id_for(state, phase),
+            phase=phase,
+            agent="claude",
+            agent_name=DISPLAY_NAMES["claude"],
+            final_plan=final_plan,
+            execution_summary=execution_summary,
+            execution_package_dir=execution_package["package_dir"],
+            supervisor_notes=active_notes_for_turn(state, turn_index),
+        ),
+        "codex": build_execution_signoff_prompt(
+            turn_id=turn_id_for(state, phase),
+            phase=phase,
+            agent="codex",
+            agent_name=DISPLAY_NAMES["codex"],
+            final_plan=final_plan,
+            execution_summary=execution_summary,
+            execution_package_dir=execution_package["package_dir"],
+            supervisor_notes=active_notes_for_turn(state, turn_index),
+        ),
+    }
+    return prepare_turn(state, phase=phase, prompt_texts=prompt_texts, active_agents=["claude", "codex"])
+
+
 def serve_live(state: dict[str, Any]) -> None:
     initial_turn = current_turn(state)
     plan_initial = wait_for_turn(state, initial_turn, next_phase="plan-review")
@@ -1164,6 +1474,7 @@ def serve_live(state: dict[str, Any]) -> None:
     dispatch_turn(state, finalize_turn)
     finalize_result = wait_for_turn(state, finalize_turn, next_phase="plan-signoff")
     current_final = finalize_result[final_plan_base]
+    state["final_plan"] = current_final
     write_json(final_candidate_path(state), current_final)
     state["summary"]["final_plan_file"] = str(final_candidate_path(state))
     save_state(state)
@@ -1204,6 +1515,7 @@ def serve_live(state: dict[str, Any]) -> None:
             next_phase=f"plan-signoff-round-{signoff_round_index + 1}",
         )
         current_final = fixed[final_plan_base]
+        state["final_plan"] = current_final
         write_json(final_candidate_path(state), current_final)
         state["summary"]["final_plan_file"] = str(final_candidate_path(state))
         save_state(state)
@@ -1215,14 +1527,165 @@ def serve_live(state: dict[str, Any]) -> None:
         signoff_round_index += 1
 
     state["status"] = "approved" if final_approved else "needs-attention"
+    state["summary"]["plan_approved"] = final_approved
     state["summary"]["final_approved"] = final_approved
+    state["summary"]["plan_signoffs"] = latest_signoffs
     state["summary"]["final_signoffs"] = latest_signoffs
     state["summary"]["final_candidate"] = current_final
+    state["summary"]["execution_approved"] = False
+    save_state(state)
+    if not final_approved:
+        persist_report(state)
+        supervisor_log_line(
+            state,
+            f"Live run finished at plan stage. plan_approved={final_approved}. Report: {report_path(state)}",
+        )
+        return
+
+    executor = final_plan_base
+    reviewer = peer_agent(executor)
+    state["selected_executor"] = executor
+    state["selected_reviewer"] = reviewer
+    save_state(state)
+    pause_for_boundary(
+        state,
+        label=f"Plan approved. Executor: {executor}. Reviewer: {reviewer}.",
+        next_phase="execute-initial",
+    )
+
+    execute_turn = build_execute_turn(state, executor=executor, final_plan=current_final)
+    dispatch_turn(state, execute_turn)
+    execute_result = wait_for_turn(state, execute_turn, next_phase="execution-review")
+    current_execution = execute_result[executor]
+    current_execution_package = collect_execution_package(
+        state,
+        turn=execute_turn,
+        executor=executor,
+        execution_summary=current_execution,
+    )
+    state["summary"]["execution_review"] = {}
+    state["summary"]["execution_signoffs"] = {}
+    state["summary"]["current_execution"] = current_execution
+    save_state(state)
+    pause_for_boundary(state, label="Initial execution complete.", next_phase="execution-review")
+
+    review_turn = build_execution_review_turn(
+        state,
+        executor=executor,
+        reviewer=reviewer,
+        final_plan=current_final,
+        execution_summary=current_execution,
+        execution_package=current_execution_package,
+    )
+    dispatch_turn(state, review_turn)
+    review_next_phase = "execution-signoff"
+    if state["signoff_rounds"] > 0:
+        review_next_phase = "execution-fix-round-1"
+    execution_review_result = wait_for_turn(state, review_turn, next_phase=review_next_phase)[reviewer]
+    state["summary"]["execution_review"] = execution_review_result
+    save_state(state)
+
+    current_execution_signoffs: dict[str, dict[str, Any]] = {}
+    execution_approved = False
+    pending_fix_feedback: dict[str, Any] | None = None
+    execution_fix_round = 0
+
+    if execution_review_result["overall_verdict"] == "approve":
+        pause_for_boundary(
+            state,
+            label="Implementation review approved. Proceeding to implementation signoff.",
+            next_phase="execution-signoff",
+        )
+    else:
+        if state["signoff_rounds"] == 0:
+            state["status"] = "needs-attention"
+            state["summary"]["execution_approved"] = False
+            state["summary"]["final_approved"] = False
+            save_state(state)
+            persist_report(state)
+            supervisor_log_line(
+                state,
+                "Implementation review requested changes but no execution fix rounds are available.",
+            )
+            return
+        execution_fix_round = 1
+        pending_fix_feedback = execution_review_result
+        pause_for_boundary(
+            state,
+            label="Implementation review requested changes.",
+            next_phase="execution-fix-round-1",
+        )
+
+    while True:
+        if execution_fix_round > 0:
+            fix_turn = build_execution_fix_turn(
+                state,
+                round_index=execution_fix_round,
+                executor=executor,
+                final_plan=current_final,
+                review_feedback=pending_fix_feedback or {},
+            )
+            dispatch_turn(state, fix_turn)
+            fix_result = wait_for_turn(
+                state,
+                fix_turn,
+                next_phase=f"execution-signoff-round-{execution_fix_round}",
+            )
+            current_execution = fix_result[executor]
+            current_execution_package = collect_execution_package(
+                state,
+                turn=fix_turn,
+                executor=executor,
+                execution_summary=current_execution,
+            )
+            state["summary"]["current_execution"] = current_execution
+            save_state(state)
+            pause_for_boundary(
+                state,
+                label=f"Execution fix round {execution_fix_round} complete.",
+                next_phase=f"execution-signoff-round-{execution_fix_round}",
+            )
+
+        signoff_turn = build_execution_signoff_turn(
+            state,
+            round_index=execution_fix_round,
+            final_plan=current_final,
+            execution_summary=current_execution,
+            execution_package=current_execution_package,
+        )
+        dispatch_turn(state, signoff_turn)
+        next_phase = None
+        if execution_fix_round < state["signoff_rounds"]:
+            next_phase = f"execution-fix-round-{execution_fix_round + 1}"
+        current_execution_signoffs = wait_for_turn(state, signoff_turn, next_phase=next_phase)
+        if all(result["overall_verdict"] == "approve" for result in current_execution_signoffs.values()):
+            execution_approved = True
+            break
+        if execution_fix_round >= state["signoff_rounds"]:
+            break
+        pending_fix_feedback = summarize_signoff_objections(current_execution_signoffs)
+        next_fix_round = execution_fix_round + 1
+        pause_for_boundary(
+            state,
+            label=f"Implementation signoff round {execution_fix_round + 1} found objections.",
+            next_phase=f"execution-fix-round-{next_fix_round}",
+        )
+        execution_fix_round = next_fix_round
+
+    state["status"] = "approved" if execution_approved else "needs-attention"
+    state["summary"]["execution_approved"] = execution_approved
+    state["summary"]["execution_signoffs"] = current_execution_signoffs
+    state["summary"]["current_execution"] = current_execution
+    state["summary"]["final_approved"] = execution_approved
     save_state(state)
     persist_report(state)
     supervisor_log_line(
         state,
-        f"Live run finished. final_approved={final_approved}. Report: {report_path(state)}",
+        (
+            "Live run finished. "
+            f"plan_approved={final_approved}, execution_approved={execution_approved}. "
+            f"Report: {report_path(state)}"
+        ),
     )
 
 
@@ -1345,7 +1808,7 @@ def serve_mode(args: argparse.Namespace) -> int:
     state_file = Path(args.state_file).resolve()
     state = load_state(state_file)
     supervisor_log_line(state, f"Supervisor attached to {state['run_id']} in session {state['session_name']}.")
-    supervisor_log_line(state, "This is the live V1 plan-only protocol. No code-writing phases are enabled here.")
+    supervisor_log_line(state, "This is the live peer-forge protocol with plan, execution, review, and signoff phases.")
     try:
         serve_live(state)
         return 0

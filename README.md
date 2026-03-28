@@ -181,11 +181,23 @@ If you do not want to spell out the full CLI, use the main skill:
 
 Current live scope:
 
-- plan-only
+- full plan -> execute -> review -> signoff workflow
 - long-lived Claude and Codex sessions
 - tmux panes for Claude, Codex, and the supervisor
 - symmetric supervisor notes only
-- no implementation phase yet
+- protocol-level read-only enforcement for non-write phases
+
+Current live phase flow:
+
+1. independent plans
+2. cross-review
+3. revision
+4. consensus
+5. final plan
+6. plan signoff
+7. selected-side execution
+8. peer implementation review
+9. bounded execution fix/signoff rounds
 
 Startup note:
 
@@ -275,7 +287,7 @@ The lower-level workflow when you want more explicit control over task, acceptan
 
 ### `peer-forge-live`
 
-The live tmux-based plan consensus mode when you want to watch both interactive sessions side by side and supervise the process in real time.
+The live tmux-based full peer workflow when you want to watch both interactive sessions side by side and supervise planning, execution, and review in real time.
 
 ### `codex-collab`
 
