@@ -6,9 +6,12 @@ from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
+import threading
+import time
 import textwrap
 import uuid
 from dataclasses import dataclass
@@ -19,6 +22,7 @@ from typing import Any
 
 TEMP_COMMIT_NAME = "peer-consensus"
 TEMP_COMMIT_EMAIL = "peer-consensus@local"
+DEFAULT_AGENT_TIMEOUT_SECONDS = 1800
 SEVERITY_WEIGHTS = {
     "critical": 13,
     "high": 8,
@@ -26,6 +30,7 @@ SEVERITY_WEIGHTS = {
     "low": 2,
     "info": 0,
 }
+PROGRESS_LOCK = threading.Lock()
 
 
 PLAN_SCHEMA: dict[str, Any] = {
@@ -228,6 +233,39 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
+def format_duration(seconds: float) -> str:
+    rounded = int(round(seconds))
+    minutes, secs = divmod(rounded, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h{minutes:02d}m{secs:02d}s"
+    if minutes:
+        return f"{minutes}m{secs:02d}s"
+    return f"{secs}s"
+
+
+def format_timeout(timeout: int | None) -> str:
+    if timeout is None:
+        return "none"
+    return format_duration(float(timeout))
+
+
+def log_progress(message: str) -> None:
+    timestamp = datetime.now().astimezone().strftime("%H:%M:%S")
+    with PROGRESS_LOCK:
+        print(f"[peer-consensus {timestamp}] {message}", file=sys.stderr, flush=True)
+
+
+def format_cmd_display(cmd: list[str], *, max_arg_length: int = 160) -> str:
+    parts: list[str] = []
+    for arg in cmd:
+        normalized = arg.replace("\n", "\\n")
+        if len(normalized) > max_arg_length:
+            normalized = f"{normalized[: max_arg_length - 20]}...<{len(normalized)} chars>"
+        parts.append(shlex.quote(normalized))
+    return " ".join(parts)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run a dual-agent peer-consensus coding workflow with Claude Code and Codex.",
@@ -270,6 +308,12 @@ def parse_args() -> argparse.Namespace:
         help="Copy the approved final files back into the source workspace.",
     )
     parser.add_argument(
+        "--agent-timeout-seconds",
+        type=int,
+        default=DEFAULT_AGENT_TIMEOUT_SECONDS,
+        help=f"Maximum seconds to wait for each Claude/Codex stage. Use 0 to disable. Default: {DEFAULT_AGENT_TIMEOUT_SECONDS}.",
+    )
+    parser.add_argument(
         "--cleanup-workspaces",
         action="store_true",
         help="Remove the temporary isolated workspaces after the run completes.",
@@ -289,6 +333,8 @@ def parse_args() -> argparse.Namespace:
         help="Disable Claude bare mode. Bare mode is enabled by default to reduce prompt contamination.",
     )
     args = parser.parse_args()
+    if args.agent_timeout_seconds < 0:
+        parser.error("--agent-timeout-seconds must be >= 0.")
     if "--signoff-rounds" in sys.argv:
         print("Warning: --signoff-rounds is deprecated; use --review-rounds.", file=sys.stderr)
     return args
@@ -322,19 +368,26 @@ def run_cmd(
     merged_env = os.environ.copy()
     if env:
         merged_env.update(env)
-    proc = subprocess.run(
-        cmd,
-        cwd=str(cwd) if cwd else None,
-        input=input_text,
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=timeout,
-        env=merged_env,
-    )
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(cwd) if cwd else None,
+            input=input_text,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=timeout,
+            env=merged_env,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout or ""
+        stderr = exc.stderr or ""
+        raise RuntimeError(
+            f"Command timed out after {timeout}s: {format_cmd_display(cmd)}\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}"
+        ) from exc
     if check and proc.returncode != 0:
         raise RuntimeError(
-            f"Command failed ({proc.returncode}): {' '.join(cmd)}\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
+            f"Command failed ({proc.returncode}): {format_cmd_display(cmd)}\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
         )
     return proc
 
@@ -939,6 +992,7 @@ def run_claude(
     output_dir: Path,
     model: str | None,
     bare: bool,
+    timeout: int | None,
 ) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     prompt_path = output_dir / "prompt.txt"
@@ -964,7 +1018,7 @@ def run_claude(
     if model:
         cmd.extend(["--model", model])
     cmd.append(prompt)
-    proc = run_cmd(cmd, cwd=workspace, check=False)
+    proc = run_cmd(cmd, cwd=workspace, check=False, timeout=timeout)
     write_text(stdout_path, proc.stdout)
     write_text(stderr_path, proc.stderr)
     if proc.returncode != 0:
@@ -988,6 +1042,7 @@ def run_codex(
     output_dir: Path,
     model: str | None,
     writable: bool,
+    timeout: int | None,
 ) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     prompt_path = output_dir / "prompt.txt"
@@ -1020,7 +1075,7 @@ def run_codex(
     if model:
         cmd.extend(["-m", model])
     cmd.append("-")
-    proc = run_cmd(cmd, cwd=workspace, input_text=prompt, check=False)
+    proc = run_cmd(cmd, cwd=workspace, input_text=prompt, check=False, timeout=timeout)
     write_text(stdout_path, proc.stdout)
     write_text(stderr_path, proc.stderr)
     if proc.returncode != 0:
@@ -1051,42 +1106,73 @@ def run_agent_stage(
     claude_model: str | None,
     codex_model: str | None,
     claude_bare: bool,
+    agent_timeout: int | None,
     read_only: bool,
 ) -> StageRun:
+    mode_label = "read-only" if read_only else "write"
+    started_at = time.monotonic()
+    log_progress(
+        f"{phase}: {agent} started ({mode_label}, timeout={format_timeout(agent_timeout)})"
+    )
     before_status = ""
     before_diff = ""
     before_head = workspace_head(workspace, git_mode)
-    if read_only:
-        before_status, before_diff = snapshot_workspace_state(workspace, git_mode)
-    if agent == "claude":
-        result = run_claude(prompt, workspace, shared_dirs, schema, stage_dir, claude_model, claude_bare)
-    elif agent == "codex":
-        result = run_codex(prompt, workspace, shared_dirs, schema, stage_dir, codex_model, not read_only)
-    else:
-        raise ValueError(agent)
-    after_head = workspace_head(workspace, git_mode)
-    if before_head != after_head:
-        raise RuntimeError(f"{agent} changed HEAD during phase '{phase}'. Creating commits or switching refs is not allowed.")
-    if read_only:
-        assert_workspace_unchanged(before_status, before_diff, workspace, git_mode, agent, phase)
-    package_dir = stage_dir / "package"
-    if read_only:
-        changed_files, diff_path = create_empty_package(package_dir)
-    else:
-        changed_files, diff_path = collect_package(workspace, baseline, package_dir, git_mode)
-    return StageRun(
-        agent=agent,
-        phase=phase,
-        workspace=workspace,
-        prompt_path=result["prompt_path"],
-        stdout_path=result["stdout_path"],
-        stderr_path=result["stderr_path"],
-        parsed_path=result["parsed_path"],
-        parsed=result["parsed"],
-        changed_files=changed_files,
-        diff_path=diff_path,
-        package_dir=package_dir,
-    )
+    try:
+        if read_only:
+            before_status, before_diff = snapshot_workspace_state(workspace, git_mode)
+        if agent == "claude":
+            result = run_claude(
+                prompt,
+                workspace,
+                shared_dirs,
+                schema,
+                stage_dir,
+                claude_model,
+                claude_bare,
+                agent_timeout,
+            )
+        elif agent == "codex":
+            result = run_codex(
+                prompt,
+                workspace,
+                shared_dirs,
+                schema,
+                stage_dir,
+                codex_model,
+                not read_only,
+                agent_timeout,
+            )
+        else:
+            raise ValueError(agent)
+        after_head = workspace_head(workspace, git_mode)
+        if before_head != after_head:
+            raise RuntimeError(f"{agent} changed HEAD during phase '{phase}'. Creating commits or switching refs is not allowed.")
+        if read_only:
+            assert_workspace_unchanged(before_status, before_diff, workspace, git_mode, agent, phase)
+        package_dir = stage_dir / "package"
+        if read_only:
+            changed_files, diff_path = create_empty_package(package_dir)
+        else:
+            changed_files, diff_path = collect_package(workspace, baseline, package_dir, git_mode)
+        duration = format_duration(time.monotonic() - started_at)
+        log_progress(f"{phase}: {agent} completed in {duration}")
+        return StageRun(
+            agent=agent,
+            phase=phase,
+            workspace=workspace,
+            prompt_path=result["prompt_path"],
+            stdout_path=result["stdout_path"],
+            stderr_path=result["stderr_path"],
+            parsed_path=result["parsed_path"],
+            parsed=result["parsed"],
+            changed_files=changed_files,
+            diff_path=diff_path,
+            package_dir=package_dir,
+        )
+    except Exception as exc:
+        duration = format_duration(time.monotonic() - started_at)
+        log_progress(f"{phase}: {agent} failed after {duration}: {exc}")
+        raise
 
 
 def run_parallel_stage_pair(
@@ -1220,10 +1306,14 @@ def main() -> int:
     ensure_cli("codex")
     repo = Path(args.repo).resolve()
     task = read_task(args)
+    agent_timeout = args.agent_timeout_seconds or None
     run_root = Path(args.run_root).resolve() if args.run_root else repo / ".claude" / "tmp" / "peer-consensus"
     run_id = f"{utc_now()}-{uuid.uuid4().hex[:8]}"
     run_dir = run_root / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
+    log_progress(
+        f"Run {run_id} started for {repo}; artifacts: {run_dir}; agent-timeout={format_timeout(agent_timeout)}"
+    )
     write_text(run_dir / "task.txt", task + "\n")
     write_json(
         run_dir / "config.json",
@@ -1236,11 +1326,13 @@ def main() -> int:
             "claude_model": args.claude_model,
             "codex_model": args.codex_model,
             "review_rounds": args.review_rounds,
+            "agent_timeout_seconds": args.agent_timeout_seconds,
             "apply_final": args.apply_final,
         },
     )
 
     workspaces = prepare_workspaces(repo, run_dir, args.include_path)
+    log_progress("Prepared isolated workspaces.")
     final_report: dict[str, Any] = {}
     common_stage_kwargs = {
         "baseline": workspaces.baseline,
@@ -1248,6 +1340,7 @@ def main() -> int:
         "claude_model": args.claude_model,
         "codex_model": args.codex_model,
         "claude_bare": not args.no_claude_bare,
+        "agent_timeout": agent_timeout,
     }
 
     try:
@@ -1398,6 +1491,7 @@ def main() -> int:
         final_plan_base = choose_final_base(consensus_claude.parsed, consensus_codex.parsed)
         merge_brief = build_merge_brief(final_plan_base, consensus_claude.parsed, consensus_codex.parsed)
         write_json(run_dir / "plan-merge-brief.json", merge_brief)
+        log_progress(f"Plan consensus selected {final_plan_base} as the final plan base.")
 
         if final_plan_base == "claude":
             base_workspace = workspaces.claude
@@ -1415,6 +1509,7 @@ def main() -> int:
             peer_agent_name = "Claude Code"
             executor_name = "Codex"
             reviewer_name = "Claude Code"
+        log_progress(f"Execution assignment: executor={executor_name}, reviewer={reviewer_name}.")
 
         final_plan = run_agent_stage(
             **common_stage_kwargs,
@@ -1484,10 +1579,16 @@ def main() -> int:
 
             if implementation_review.parsed.get("overall_verdict") == "approve":
                 final_approved = True
+                log_progress(f"Implementation approved in review round {round_idx}.")
                 break
 
             if round_idx >= args.review_rounds:
+                log_progress("Implementation review still has open issues and no more fix rounds remain.")
                 break
+
+            log_progress(
+                f"Implementation review requested changes; starting fix round {round_idx + 1} of {args.review_rounds}."
+            )
 
             current_execution = run_agent_stage(
                 **common_stage_kwargs,
@@ -1510,6 +1611,7 @@ def main() -> int:
 
         if args.apply_final and final_approved:
             apply_final_to_source(repo, current_execution.workspace, current_execution.changed_files)
+            log_progress("Applied approved final files back to the source workspace.")
 
         final_report = {
             "run_id": run_id,
@@ -1527,6 +1629,7 @@ def main() -> int:
         }
         write_json(run_dir / "report.json", final_report)
         write_text(run_dir / "report.md", markdown_report(final_report))
+        log_progress(f"Run {run_id} finished; final_approved={final_approved}; report={run_dir / 'report.json'}")
         print(json.dumps(final_report, ensure_ascii=True, indent=2))
         return 0 if final_approved else 2
     finally:
