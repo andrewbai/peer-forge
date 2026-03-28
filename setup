@@ -5,6 +5,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_NAME="$(basename "$REPO_ROOT")"
 LOCAL_INSTALL=0
 SKILL_EXCLUDES=(tools bin docs test scripts node_modules)
+REGISTERED_SKILLS=("$ROOT_NAME")
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -102,6 +103,7 @@ require_path "$REPO_ROOT/SKILL.md"
 require_path "$REPO_ROOT/peer-consensus/SKILL.md"
 require_path "$REPO_ROOT/codex-collab/SKILL.md"
 require_path "$REPO_ROOT/codex-collab/scripts/codex-headless-collab.sh"
+require_path "$REPO_ROOT/peer-forge-upgrade/SKILL.md"
 require_path "$REPO_ROOT/tools/peer_consensus.py"
 require_path "$REPO_ROOT/bin/peer-forge"
 require_path "$REPO_ROOT/bin/peer-consensus"
@@ -119,7 +121,22 @@ for skill_dir in "$REPO_ROOT"/*/; do
   is_excluded_skill_dir "$skill_name" && continue
   [[ -f "$skill_dir/SKILL.md" ]] || continue
   link_skill "$ROOT_NAME/$skill_name" "$SKILLS_DIR/$skill_name"
+  REGISTERED_SKILLS+=("$skill_name")
 done
+
+print_skill_paths() {
+  local skill_name
+  for skill_name in "${REGISTERED_SKILLS[@]}"; do
+    echo "- $SKILLS_DIR/$skill_name"
+  done
+}
+
+print_skill_commands() {
+  local skill_name
+  for skill_name in "${REGISTERED_SKILLS[@]}"; do
+    echo "- /$skill_name"
+  done
+}
 
 if [[ "$LOCAL_INSTALL" -eq 1 ]]; then
   PROJECT_ROOT="$(dirname "$(dirname "$SKILLS_DIR")")"
@@ -129,9 +146,7 @@ peer-forge installed locally in:
   $PROJECT_ROOT
 
 Skills:
-- $SKILLS_DIR/$ROOT_NAME
-- $SKILLS_DIR/peer-consensus
-- $SKILLS_DIR/codex-collab
+$(print_skill_paths)
 
 CLI:
 - $REPO_ROOT/bin/peer-forge
@@ -140,6 +155,7 @@ CLI:
 Usage in Claude Code:
 - /peer-forge 你的任务描述
 - /peer-consensus 按完整双 Agent 共识协议处理这个任务：...
+- /peer-forge-upgrade 更新本机或项目里的 peer-forge
 EOF
 else
   cat <<EOF
@@ -147,17 +163,14 @@ else
 peer-forge installed for Claude Code.
 
 Skills:
-- $SKILLS_DIR/$ROOT_NAME
-- $SKILLS_DIR/peer-consensus
-- $SKILLS_DIR/codex-collab
+$(print_skill_paths)
 
 CLI:
 - $REPO_ROOT/bin/peer-forge
 - $REPO_ROOT/bin/peer-consensus
 
 Usage in Claude Code:
-- /peer-forge 处理这个任务：...
-- /peer-consensus 按完整双 Agent 共识协议处理这个任务：...
+$(print_skill_commands)
 
 If Claude Code was already open, restart it once so the new skills are reloaded.
 EOF

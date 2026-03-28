@@ -31,7 +31,7 @@ Suggested short pitch:
 
 Release tag:
 
-- `v0.5.1`
+- `v0.6.0`
 
 Notes:
 

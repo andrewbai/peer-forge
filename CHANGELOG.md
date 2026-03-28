@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.6.0 - 2026-03-28
+
+Self-upgrade skill and dynamic skill registration output.
+
+- Added the new `peer-forge-upgrade` skill so Claude Code can upgrade the installed `peer-forge` checkout in place.
+- Updated `setup` to validate the new skill and print the installed skill list dynamically instead of hardcoding it.
+- Updated the docs to surface `/peer-forge-upgrade` as a first-class command.
+
 ## v0.5.1 - 2026-03-28
 
 Path consistency and safer install tooling.

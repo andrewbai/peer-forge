@@ -17,7 +17,7 @@
 - 作为 Claude Code 的技能包直接安装
 - 作为独立 CLI 仓库直接运行
 
-当前版本：`v0.5.1`
+当前版本：`v0.6.0`
 
 ## 目录结构
 
@@ -30,6 +30,8 @@ peer-forge/
 │   ├── SKILL.md
 │   └── scripts/
 │       └── codex-headless-collab.sh
+├── peer-forge-upgrade/
+│   └── SKILL.md
 ├── tools/
 │   └── peer_consensus.py
 ├── bin/
@@ -59,6 +61,7 @@ git clone git@github.com:andrewbai/peer-forge.git ~/.claude/skills/peer-forge
 - `/peer-forge`
 - `/peer-consensus`
 - `/codex-collab`
+- `/peer-forge-upgrade`
 
 如果 Claude Code 当时已经打开，重启一次让它重新加载 skill。
 
@@ -182,6 +185,10 @@ git --version
 ### `codex-collab`
 
 这是一个更轻量的辅助 skill，用来让 Claude 驱动无头 Codex 做局部协作。它更快，但不等同于完整的 peer workflow。
+
+### `peer-forge-upgrade`
+
+这是一个自升级 skill，用来更新已经安装好的 `peer-forge` 并重新执行 `setup`。
 
 ## 备注
 

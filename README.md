@@ -14,7 +14,7 @@ Standalone toolkit for running a dual-agent coding workflow with Claude Code and
 
 This repo is designed to install cleanly as a Claude Code skill pack while still exposing a direct CLI launcher.
 
-Current version: `v0.5.1`
+Current version: `v0.6.0`
 
 ## Structure
 
@@ -27,6 +27,8 @@ peer-forge/
 │   ├── SKILL.md
 │   └── scripts/
 │       └── codex-headless-collab.sh
+├── peer-forge-upgrade/
+│   └── SKILL.md
 ├── tools/
 │   └── peer_consensus.py
 ├── bin/
@@ -56,6 +58,7 @@ After that, Claude Code can discover:
 - `/peer-forge`
 - `/peer-consensus`
 - `/codex-collab`
+- `/peer-forge-upgrade`
 
 If Claude Code was already open, restart it once so it reloads the skills.
 
@@ -165,6 +168,10 @@ The lower-level workflow when you want more explicit control over task, acceptan
 ### `codex-collab`
 
 Smaller helper for Claude-driven headless Codex collaboration on a bounded file. This is faster, but it is not the same as the full peer workflow.
+
+### `peer-forge-upgrade`
+
+Self-upgrade helper for refreshing the installed `peer-forge` checkout and re-running `setup`.
 
 ## Notes
 
