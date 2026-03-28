@@ -65,3 +65,5 @@ If this toolkit is vendored inside the current project instead of being installe
 - Claude runs in `--bare` mode by default to reduce prompt contamination.
 - The protocol is round-based, not free-form multi-agent chat.
 - The script exits non-zero if the implementation review does not reach approval.
+
+If the user wants live side-by-side panes with long-lived interactive sessions instead of a headless batch run, use `peer-forge-live`.

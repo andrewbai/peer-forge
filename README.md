@@ -12,6 +12,8 @@ Standalone toolkit for running a dual-agent coding workflow with Claude Code and
 - one-sided execution
 - peer implementation review
 
+It also includes a separate live mode for tmux-based side-by-side supervision when you want to watch both interactive sessions in real time.
+
 This repo is designed to install cleanly as a Claude Code skill pack while still exposing a direct CLI launcher.
 
 Current version: `v0.9.0`
@@ -23,6 +25,8 @@ peer-forge/
 ├── SKILL.md
 ├── peer-consensus/
 │   └── SKILL.md
+├── peer-forge-live/
+│   └── SKILL.md
 ├── codex-collab/
 │   ├── SKILL.md
 │   └── scripts/
@@ -30,10 +34,14 @@ peer-forge/
 ├── peer-forge-upgrade/
 │   └── SKILL.md
 ├── tools/
-│   └── peer_consensus.py
+│   ├── live_protocol.py
+│   ├── live_tmux.py
+│   ├── peer_consensus.py
+│   └── peer_live.py
 ├── bin/
 │   ├── peer-forge
 │   ├── peer-consensus
+│   ├── peer-forge-live
 │   └── peer-forge-upgrade
 ├── setup
 ├── uninstall
@@ -58,6 +66,7 @@ After that, Claude Code can discover:
 
 - `/peer-forge`
 - `/peer-consensus`
+- `/peer-forge-live`
 - `/codex-collab`
 - `/peer-forge-upgrade`
 
@@ -117,10 +126,19 @@ Check whether an upgrade is available without modifying the checkout:
 ~/.claude/skills/peer-forge/bin/peer-forge-upgrade --check
 ```
 
+Live tmux mode:
+
+```bash
+~/.claude/skills/peer-forge/bin/peer-forge-live \
+  --repo . \
+  --task "Have Claude Code and Codex draft plans independently, cross-review, and converge while I supervise live."
+```
+
 ## Requirements
 
 - `claude` CLI installed and logged in
 - `codex` CLI installed and logged in
+- `tmux` available in PATH for `peer-forge-live`
 - Python 3 available as `python3`
 - Git available as `git`
 
@@ -129,6 +147,7 @@ Quick checks:
 ```bash
 claude -v
 codex -V
+tmux -V
 python3 --version
 git --version
 ```
@@ -155,6 +174,47 @@ If you do not want to spell out the full CLI, use the main skill:
 5. Produces one final implementation plan.
 6. Lets the chosen side execute that plan.
 7. Lets the other side review the implementation result, with bounded fix-review rounds if needed.
+
+## Live Mode
+
+`peer-forge-live` is the interactive counterpart to the batch workflow.
+
+Current live scope:
+
+- plan-only
+- long-lived Claude and Codex sessions
+- tmux panes for Claude, Codex, and the supervisor
+- symmetric supervisor notes only
+- no implementation phase yet
+
+Inside the supervisor pane, the main commands are:
+
+- `status`
+- `tail claude`
+- `tail codex`
+- `inspect claude`
+- `inspect codex`
+- `note both`
+- `wait`
+- `continue`
+- `abort`
+
+Each live run writes artifacts under:
+
+```text
+<target-repo>/.claude/tmp/peer-forge-live/<run-id>/
+```
+
+That includes:
+
+- `state.json`
+- `supervisor.log`
+- `panes/verbose.log`
+- `panes/claude.raw.log`
+- `panes/codex.raw.log`
+- `turns/<turn-id>/...`
+- `report.json`
+- `report.md`
 
 ## Artifacts
 
@@ -205,6 +265,10 @@ The simpler front door. Use this when the user wants the workflow without thinki
 ### `peer-consensus`
 
 The lower-level workflow when you want more explicit control over task, acceptance criteria, scope, and the exact two-phase protocol.
+
+### `peer-forge-live`
+
+The live tmux-based plan consensus mode when you want to watch both interactive sessions side by side and supervise the process in real time.
 
 ### `codex-collab`
 

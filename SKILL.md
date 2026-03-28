@@ -107,3 +107,13 @@ If the user wants maximum control over:
 then `peer-consensus` is the lower-level workflow.
 
 `peer-forge` is the easier front door.
+
+## When To Use `peer-forge-live` Instead
+
+If the user explicitly wants:
+- two long-lived interactive sessions
+- side-by-side live visibility
+- tmux panes and supervisor intervention
+- session memory across turns
+
+then use `peer-forge-live` instead of the batch launcher.

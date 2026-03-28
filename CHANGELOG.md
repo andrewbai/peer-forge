@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+Live tmux supervision and persistent plan sessions.
+
+- Added `peer-forge-live`, a separate tmux-based live workflow with long-lived Claude and Codex interactive sessions.
+- Added `tools/peer_live.py`, `tools/live_tmux.py`, and `tools/live_protocol.py` for live plan-stage orchestration, tmux pane control, and structured result parsing.
+- Added symmetric live supervisor commands for status, tail, inspect, queued `note both`, boundary `continue`, and `abort`.
+- Added live-run artifacts under `.claude/tmp/peer-forge-live/`, including `state.json`, `supervisor.log`, raw pane logs, combined `panes/verbose.log`, per-turn prompts/results, and final reports.
+- Added the `peer-forge-live` skill, launcher, setup validation, and English/Chinese documentation for the new live plan-only mode.
+
 Supervisor notes and safe checkpoint retries.
 
 - Added symmetric supervisor `note` support so humans can inject later-phase guidance without polluting already-completed stages.

@@ -101,17 +101,23 @@ is_excluded_skill_dir() {
 
 require_path "$REPO_ROOT/SKILL.md"
 require_path "$REPO_ROOT/peer-consensus/SKILL.md"
+require_path "$REPO_ROOT/peer-forge-live/SKILL.md"
 require_path "$REPO_ROOT/codex-collab/SKILL.md"
 require_path "$REPO_ROOT/codex-collab/scripts/codex-headless-collab.sh"
 require_path "$REPO_ROOT/peer-forge-upgrade/SKILL.md"
 require_path "$REPO_ROOT/tools/peer_consensus.py"
+require_path "$REPO_ROOT/tools/live_protocol.py"
+require_path "$REPO_ROOT/tools/live_tmux.py"
+require_path "$REPO_ROOT/tools/peer_live.py"
 require_path "$REPO_ROOT/bin/peer-forge"
 require_path "$REPO_ROOT/bin/peer-consensus"
+require_path "$REPO_ROOT/bin/peer-forge-live"
 require_path "$REPO_ROOT/bin/peer-forge-upgrade"
 
 echo "Checking dependencies..."
 check_bin claude
 check_bin codex
+check_bin tmux
 check_bin python3
 check_bin git
 
@@ -152,11 +158,13 @@ $(print_skill_paths)
 CLI:
 - $REPO_ROOT/bin/peer-forge
 - $REPO_ROOT/bin/peer-consensus
+- $REPO_ROOT/bin/peer-forge-live
 - $REPO_ROOT/bin/peer-forge-upgrade
 
 Usage in Claude Code:
 - /peer-forge 你的任务描述
 - /peer-consensus 按完整双 Agent 共识协议处理这个任务：...
+- /peer-forge-live 开一个 tmux live run，让 Claude 和 Codex 并排出方案并实时监督
 - /peer-forge-upgrade 更新本机或项目里的 peer-forge
 EOF
 else
@@ -170,6 +178,7 @@ $(print_skill_paths)
 CLI:
 - $REPO_ROOT/bin/peer-forge
 - $REPO_ROOT/bin/peer-consensus
+- $REPO_ROOT/bin/peer-forge-live
 - $REPO_ROOT/bin/peer-forge-upgrade
 
 Usage in Claude Code:

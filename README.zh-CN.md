@@ -12,6 +12,8 @@
 - 由一方执行代码
 - 另一方 review 实现结果
 
+另外，这个仓库现在也带了一个独立的 live 模式，用来在 tmux 里并排看两个交互式 session 实时工作。
+
 这个仓库的目标是同时具备两种形态：
 
 - 作为 Claude Code 的技能包直接安装
@@ -26,6 +28,8 @@ peer-forge/
 ├── SKILL.md
 ├── peer-consensus/
 │   └── SKILL.md
+├── peer-forge-live/
+│   └── SKILL.md
 ├── codex-collab/
 │   ├── SKILL.md
 │   └── scripts/
@@ -33,10 +37,14 @@ peer-forge/
 ├── peer-forge-upgrade/
 │   └── SKILL.md
 ├── tools/
-│   └── peer_consensus.py
+│   ├── live_protocol.py
+│   ├── live_tmux.py
+│   ├── peer_consensus.py
+│   └── peer_live.py
 ├── bin/
 │   ├── peer-forge
 │   ├── peer-consensus
+│   ├── peer-forge-live
 │   └── peer-forge-upgrade
 ├── setup
 ├── uninstall
@@ -61,6 +69,7 @@ git clone git@github.com:andrewbai/peer-forge.git ~/.claude/skills/peer-forge
 
 - `/peer-forge`
 - `/peer-consensus`
+- `/peer-forge-live`
 - `/codex-collab`
 - `/peer-forge-upgrade`
 
@@ -120,10 +129,19 @@ git clone git@github.com:andrewbai/peer-forge.git .claude/skills/peer-forge
 ~/.claude/skills/peer-forge/bin/peer-forge-upgrade --check
 ```
 
+live tmux 模式：
+
+```bash
+~/.claude/skills/peer-forge/bin/peer-forge-live \
+  --repo . \
+  --task "让 Claude Code 和 Codex 独立出方案、互相 review，并且我在旁边实时监督。"
+```
+
 ## 环境要求
 
 - 已安装并登录 `claude` CLI
 - 已安装并登录 `codex` CLI
+- 如果要用 `peer-forge-live`，还需要系统里有 `tmux`
 - 系统里可用 `python3`
 - 系统里可用 `git`
 
@@ -132,6 +150,7 @@ git clone git@github.com:andrewbai/peer-forge.git .claude/skills/peer-forge
 ```bash
 claude -v
 codex -V
+tmux -V
 python3 --version
 git --version
 ```
@@ -161,6 +180,47 @@ git --version
 6. 让双方基于共识选出最终方案。
 7. 由被选中的一方按最终方案执行代码。
 8. 由另一方 review 实现结果，必要时进入有限轮次的 fix/review。
+
+## Live 模式
+
+`peer-forge-live` 是 batch 工作流的交互式对应物。
+
+当前 live 范围：
+
+- 只做 plan，不写代码
+- Claude 和 Codex 都是长生命周期 session
+- 用 tmux 分 pane 同时看 Claude、Codex、supervisor
+- 只允许对称 supervisor note
+- 还没有实现 execution 阶段
+
+supervisor pane 里的主要命令：
+
+- `status`
+- `tail claude`
+- `tail codex`
+- `inspect claude`
+- `inspect codex`
+- `note both`
+- `wait`
+- `continue`
+- `abort`
+
+每次 live run 的产物会写到：
+
+```text
+<target-repo>/.claude/tmp/peer-forge-live/<run-id>/
+```
+
+里面包括：
+
+- `state.json`
+- `supervisor.log`
+- `panes/verbose.log`
+- `panes/claude.raw.log`
+- `panes/codex.raw.log`
+- `turns/<turn-id>/...`
+- `report.json`
+- `report.md`
 
 ## 运行产物
 
@@ -222,6 +282,14 @@ git --version
 - 需要初始阶段互不污染
 - 需要先做方案共识，再做执行与 review
 - 希望更明确地控制 `task / acceptance / scope`
+
+### `peer-forge-live`
+
+这是 live tmux 模式，适用于：
+
+- 你想并排看两个交互式 session
+- 你想实时监督它们的过程
+- 你想保留 session memory，而不是每个阶段都冷启动
 
 ### `codex-collab`
 
