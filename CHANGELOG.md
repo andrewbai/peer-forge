@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.5.0 - 2026-03-28
+
+Root-skill repo layout and gstack-style installation flow.
+
+- Promoted `peer-forge` to the repo root with `SKILL.md` as the main skill entrypoint.
+- Moved `peer-consensus` and `codex-collab` to root-level skill directories and removed the old `.claude/skills/` nesting from the repo layout.
+- Replaced the previous installer with a single root `setup` script and added a matching `uninstall` script.
+- Switched the documented install flow to clone directly into `.claude/skills/peer-forge` globally or locally, then register sibling skill symlinks.
+- Unified skill execution docs around the `bin/peer-forge` and `bin/peer-consensus` launchers.
+
 ## v0.4.0 - 2026-03-28
 
 Claude Code installation flow and global launchers.

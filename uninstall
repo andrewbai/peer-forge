@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_NAME="$(basename "$REPO_ROOT")"
+LOCAL_INSTALL=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --local)
+      LOCAL_INSTALL=1
+      shift
+      ;;
+    -h|--help)
+      cat <<EOF
+Usage:
+  $ROOT_NAME/uninstall
+  $ROOT_NAME/uninstall --local
+EOF
+      exit 0
+      ;;
+    *)
+      echo "ERROR: unknown argument: $1" >&2
+      exit 1
+      ;;
+  esac
+done
+
+SKILLS_DIR="$(dirname "$REPO_ROOT")"
+if [[ "$(basename "$SKILLS_DIR")" != "skills" || "$(basename "$(dirname "$SKILLS_DIR")")" != ".claude" ]]; then
+  echo "ERROR: uninstall expects the repo to live at .claude/skills/$ROOT_NAME" >&2
+  echo "  Current location: $REPO_ROOT" >&2
+  exit 1
+fi
+
+remove_link() {
+  local path="$1"
+  local expected="$2"
+
+  if [[ -L "$path" ]]; then
+    local current
+    current="$(readlink "$path")"
+    if [[ "$current" == "$expected" ]]; then
+      rm "$path"
+      echo "  REMOVE: $(basename "$path")"
+    fi
+  fi
+}
+
+for skill_dir in "$REPO_ROOT"/*/; do
+  [[ -f "$skill_dir/SKILL.md" ]] || continue
+  skill_name="$(basename "$skill_dir")"
+  remove_link "$SKILLS_DIR/$skill_name" "$ROOT_NAME/$skill_name"
+done
+
+rm -rf "$REPO_ROOT"
+
+if [[ "$LOCAL_INSTALL" -eq 1 ]]; then
+  PROJECT_ROOT="$(dirname "$(dirname "$SKILLS_DIR")")"
+  echo "peer-forge removed from local project: $PROJECT_ROOT"
+else
+  echo "peer-forge removed from Claude Code."
+fi

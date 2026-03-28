@@ -1,4 +1,4 @@
-# Peer Consensus Toolkit
+# Peer Forge
 
 [English README](./README.md)
 
@@ -12,51 +12,89 @@
 - 由一方执行代码
 - 另一方 review 实现结果
 
-这个仓库的目标不是绑死在某一个项目里，而是作为一个独立工具仓库存在，之后按需同步到别的项目中使用。
+这个仓库的目标是同时具备两种形态：
 
-当前版本：`v0.4.0`
+- 作为 Claude Code 的技能包直接安装
+- 作为独立 CLI 仓库直接运行
+
+当前版本：`v0.5.0`
 
 ## 目录结构
 
 ```text
-peer-consensus-toolkit/
-├── bin/
-│   ├── peer-consensus
-│   └── peer-forge
-├── .claude/
-│   └── skills/
-│       ├── peer-forge/
-│       │   └── SKILL.md
-│       ├── peer-consensus/
-│       │   └── SKILL.md
-│       └── codex-collab/
-│           ├── SKILL.md
-│           └── scripts/
-│               └── codex-headless-collab.sh
-├── scripts/
-│   └── install-claude-skills.sh
+peer-forge/
+├── SKILL.md
+├── peer-consensus/
+│   └── SKILL.md
+├── codex-collab/
+│   ├── SKILL.md
+│   └── scripts/
+│       └── codex-headless-collab.sh
 ├── tools/
 │   └── peer_consensus.py
+├── bin/
+│   ├── peer-forge
+│   └── peer-consensus
+├── setup
+├── uninstall
 ├── README.md
-└── README.zh-CN.md
+├── README.zh-CN.md
+├── CHANGELOG.md
+├── GITHUB_METADATA.md
+├── LICENSE
+└── VERSION
 ```
 
-## 最简单的 Skill 用法
+## 安装
 
-如果你不想手动组织一堆参数，就用 `peer-forge`。
+### 全局安装（推荐）
 
-`peer-forge` 是更产品化的入口：
+```bash
+git clone git@github.com:andrewbai/peer-forge.git ~/.claude/skills/peer-forge
+~/.claude/skills/peer-forge/setup
+```
 
-- 只给任务也可以
-- `acceptance` 不是必填
-- `scope` 也不是必填
+装完后，Claude Code 会直接发现：
 
-你在 Claude Code 里可以直接表达这种意图：
+- `/peer-forge`
+- `/peer-consensus`
+- `/codex-collab`
 
-- `使用 peer-forge skill 处理这个任务`
-- `/peer-forge 让 Claude 和 Codex 都出方案，互相 review，然后收敛成最终版本`
+如果 Claude Code 当时已经打开，重启一次让它重新加载 skill。
 
-底层依然是跑 `tools/peer_consensus.py`，但它把“只给任务”视为正常用法。
+### 项目内 vendoring
+
+在目标项目根目录执行：
+
+```bash
+git clone git@github.com:andrewbai/peer-forge.git .claude/skills/peer-forge
+./.claude/skills/peer-forge/setup --local
+```
+
+这样会把整个仓库放进项目里，再由 `setup` 注册 sibling symlink：
+
+- `.claude/skills/peer-consensus -> peer-forge/peer-consensus`
+- `.claude/skills/codex-collab -> peer-forge/codex-collab`
+
+### 直接用 CLI
+
+全局安装：
+
+```bash
+~/.claude/skills/peer-forge/bin/peer-forge \
+  --repo /path/to/project \
+  --task "实现这次需求改动。" \
+  --apply-final
+```
+
+项目内 vendoring：
+
+```bash
+./.claude/skills/peer-forge/bin/peer-forge \
+  --repo . \
+  --task "实现这次需求改动。" \
+  --apply-final
+```
 
 ## 环境要求
 
@@ -74,108 +112,20 @@ python3 --version
 git --version
 ```
 
-## 为什么不是把整个仓库都塞进 `.claude`
+## 最简单的 Skill 用法
 
-因为 `.claude/skills/` 本质上只应该放 skill 本身。
+如果你不想手动组织一堆参数，就用 `peer-forge`。
 
-- `SKILL.md` 和 skill 自带的小脚本，应该放在 `.claude/skills/`
-- `tools/peer_consensus.py`、`bin/peer-forge` 这种运行工具，不应该混在 `.claude` 配置目录里
-- `README`、`CHANGELOG`、`LICENSE`、版本文件也不是 Claude Code 运行 skill 时必须放进 `.claude` 的内容
+`peer-forge` 是更产品化的入口：
 
-所以更干净的结构是：
+- 只给任务也可以
+- `acceptance` 不是必填
+- `scope` 也不是必填
 
-- 仓库本体独立放在一个稳定目录，比如 `~/.peer-forge`
-- Claude Code 只在 `~/.claude/skills/` 里注册这几个 skill
+你在 Claude Code 里可以直接表达这种意图：
 
-## 安装到 Claude Code 里用 `skill`（推荐）
-
-如果你已经把仓库放在本机任意位置，比如现在这份：
-
-```bash
-cd /Users/andrew/Desktop/peer-consensus-toolkit
-bash scripts/install-claude-skills.sh
-```
-
-这个安装脚本会做 4 件事：
-
-1. 把当前仓库注册成 `~/.peer-forge`
-2. 把 `peer-forge` 安装到 `~/.claude/skills/peer-forge`
-3. 把 `peer-consensus` 安装到 `~/.claude/skills/peer-consensus`
-4. 把 `codex-collab` 安装到 `~/.claude/skills/codex-collab`
-
-装完后，如果 Claude Code 当时已经开着，重启一次让它重新加载 skill。
-
-之后你在任意项目里都可以直接这样说：
-
-- `/peer-forge 处理这个任务：...`
-- `/peer-consensus 按完整双 Agent 共识协议处理这个任务：...`
-
-如果你是从 GitHub 新装，一套更标准的流程是：
-
-```bash
-git clone git@github.com:andrewbai/peer-forge.git ~/peer-forge
-cd ~/peer-forge
-bash scripts/install-claude-skills.sh
-```
-
-## 两种运行方式
-
-### 1. 作为独立工具，直接作用于任意项目
-
-你可以把这个工具仓库独立放着，然后直接指向别的代码仓库运行：
-
-```bash
-python3 /path/to/peer-consensus-toolkit/tools/peer_consensus.py \
-  --repo /path/to/target-project \
-  --task "实现这次需求改动。"
-```
-
-如果你已经完成了上面的 Claude Code 全局安装，也可以直接用 launcher：
-
-```bash
-~/.peer-forge/bin/peer-forge \
-  --repo /path/to/target-project \
-  --task "实现这次需求改动。"
-```
-
-只有在需要时，再补 `--scope` 和 `--acceptance`：
-
-```bash
-python3 /path/to/peer-consensus-toolkit/tools/peer_consensus.py \
-  --repo /path/to/target-project \
-  --task "实现这次需求改动。" \
-  --acceptance "不要破坏公开 API。" \
-  --scope src/example.ts
-```
-
-如果双方最终都认可，并且你要把结果直接写回目标项目：
-
-```bash
-python3 /path/to/peer-consensus-toolkit/tools/peer_consensus.py \
-  --repo /path/to/target-project \
-  --task-file /path/to/task.md \
-  --scope src/example.ts \
-  --apply-final
-```
-
-### 2. 同步进某个具体项目里使用
-
-把下面这些路径复制到目标项目根目录：
-
-- `.claude/skills/peer-forge/`
-- `.claude/skills/peer-consensus/`
-- `.claude/skills/codex-collab/`
-- `tools/peer_consensus.py`
-
-然后可以直接用 skill 思路，或者直接跑脚本：
-
-```bash
-python3 tools/peer_consensus.py \
-  --repo . \
-  --task "实现这次需求改动。"
-```
-
-只有在有必要时，再补 `--scope` 和 `--acceptance`。
+- `使用 peer-forge skill 处理这个任务`
+- `/peer-forge 让 Claude 和 Codex 都出方案，互相 review，然后收敛成最终版本`
 
 ## 这套工作流具体做什么
 
@@ -233,22 +183,9 @@ python3 tools/peer_consensus.py \
 
 这是一个更轻量的辅助 skill，用来让 Claude 驱动无头 Codex 做局部协作。它更快，但不等同于完整的 peer workflow。
 
-## 推到 GitHub
-
-一个常见流程：
-
-```bash
-cd /Users/andrew/Desktop/peer-consensus-toolkit
-git init
-git add .
-git commit -m "Initial peer consensus toolkit"
-```
-
-然后你再创建 GitHub 仓库并正常 push。
-
 ## 备注
 
-- 这套工具不需要长期住在某一个具体项目里。
-- 如果你走全局安装路线，推荐让仓库本体固定挂在 `~/.peer-forge`，Claude Code 只加载 `~/.claude/skills/` 里的 skill。
-- 如果你走项目内同步路线，skill 放在 `.claude/skills/` 下，是为了相对路径还能保持正确。
+- 仓库本体本身就是主 skill，`~/.claude/skills/peer-forge/SKILL.md` 会被 Claude Code 直接发现。
+- 子 skill 由 `setup` 自动注册成 sibling symlink。
+- 所有 skill 文档都统一走 `bin/` launcher，不直接写 Python 入口。
 - 如果最终候选没有拿到双方批准，主脚本会返回非零退出码。

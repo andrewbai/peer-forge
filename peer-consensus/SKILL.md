@@ -18,7 +18,7 @@ Use this skill when the user wants Claude Code and Codex to behave like two peer
 This skill is powered by:
 
 ```bash
-~/.peer-forge/bin/peer-consensus --help
+~/.claude/skills/peer-forge/bin/peer-consensus --help
 ```
 
 ## Inputs
@@ -35,7 +35,7 @@ If the repo has important ignored files that the agents need, include them with 
 ## Standard Run
 
 ```bash
-~/.peer-forge/bin/peer-consensus \
+~/.claude/skills/peer-forge/bin/peer-consensus \
   --repo . \
   --task "Replace the current API retry logic with a bounded exponential backoff implementation." \
   --acceptance "Do not change the public API." \
@@ -47,14 +47,14 @@ If the repo has important ignored files that the agents need, include them with 
 ## Apply The Final Result Back To The Source Workspace
 
 ```bash
-~/.peer-forge/bin/peer-consensus \
+~/.claude/skills/peer-forge/bin/peer-consensus \
   --repo . \
   --task-file /tmp/task.md \
   --scope src/foo.ts \
   --apply-final
 ```
 
-If this toolkit is vendored inside the current project instead of being installed globally, replace `~/.peer-forge/bin/peer-consensus` with `python3 tools/peer_consensus.py`.
+If this toolkit is vendored inside the current project instead of being installed globally, replace `~/.claude/skills/peer-forge` with `./.claude/skills/peer-forge`.
 
 ## Notes
 

@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_NAME="$(basename "$REPO_ROOT")"
+LOCAL_INSTALL=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --local)
+      LOCAL_INSTALL=1
+      shift
+      ;;
+    -h|--help)
+      cat <<EOF
+Usage:
+  $ROOT_NAME/setup
+  $ROOT_NAME/setup --local
+
+Global install:
+  git clone <repo> ~/.claude/skills/$ROOT_NAME
+  ~/.claude/skills/$ROOT_NAME/setup
+
+Project-local install:
+  git clone <repo> .claude/skills/$ROOT_NAME
+  ./.claude/skills/$ROOT_NAME/setup --local
+EOF
+      exit 0
+      ;;
+    *)
+      echo "ERROR: unknown argument: $1" >&2
+      exit 1
+      ;;
+  esac
+done
+
+require_path() {
+  local path="$1"
+  if [[ ! -e "$path" ]]; then
+    echo "ERROR: required path not found: $path" >&2
+    exit 1
+  fi
+}
+
+check_bin() {
+  local name="$1"
+  if command -v "$name" >/dev/null 2>&1; then
+    echo "  FOUND: $name -> $(command -v "$name")"
+  else
+    echo "  WARN: $name not found in PATH"
+  fi
+}
+
+ensure_layout() {
+  SKILLS_DIR="$(dirname "$REPO_ROOT")"
+  if [[ "$(basename "$SKILLS_DIR")" != "skills" || "$(basename "$(dirname "$SKILLS_DIR")")" != ".claude" ]]; then
+    echo "ERROR: setup expects the repo to live at .claude/skills/$ROOT_NAME" >&2
+    echo "  Current location: $REPO_ROOT" >&2
+    if [[ "$LOCAL_INSTALL" -eq 1 ]]; then
+      echo "  Example: git clone <repo> .claude/skills/$ROOT_NAME && ./.claude/skills/$ROOT_NAME/setup --local" >&2
+    else
+      echo "  Example: git clone <repo> ~/.claude/skills/$ROOT_NAME && ~/.claude/skills/$ROOT_NAME/setup" >&2
+    fi
+    exit 1
+  fi
+}
+
+link_skill() {
+  local src="$1"
+  local dst="$2"
+
+  if [[ -L "$dst" ]]; then
+    local current
+    current="$(readlink "$dst")"
+    if [[ "$current" == "$src" ]]; then
+      echo "  OK: $(basename "$dst")"
+      return
+    fi
+    rm "$dst"
+  elif [[ -e "$dst" ]]; then
+    echo "  SKIP: $dst already exists (not a symlink)"
+    return
+  fi
+
+  ln -s "$src" "$dst"
+  echo "  LINK: $(basename "$dst") -> $src"
+}
+
+require_path "$REPO_ROOT/SKILL.md"
+require_path "$REPO_ROOT/peer-consensus/SKILL.md"
+require_path "$REPO_ROOT/codex-collab/SKILL.md"
+require_path "$REPO_ROOT/codex-collab/scripts/codex-headless-collab.sh"
+require_path "$REPO_ROOT/tools/peer_consensus.py"
+require_path "$REPO_ROOT/bin/peer-forge"
+require_path "$REPO_ROOT/bin/peer-consensus"
+
+echo "Checking dependencies..."
+check_bin claude
+check_bin codex
+check_bin python3
+check_bin git
+
+ensure_layout
+
+for skill_dir in "$REPO_ROOT"/*/; do
+  [[ -f "$skill_dir/SKILL.md" ]] || continue
+  skill_name="$(basename "$skill_dir")"
+  link_skill "$ROOT_NAME/$skill_name" "$SKILLS_DIR/$skill_name"
+done
+
+if [[ "$LOCAL_INSTALL" -eq 1 ]]; then
+  PROJECT_ROOT="$(dirname "$(dirname "$SKILLS_DIR")")"
+  cat <<EOF
+
+peer-forge installed locally in:
+  $PROJECT_ROOT
+
+Skills:
+- $SKILLS_DIR/$ROOT_NAME
+- $SKILLS_DIR/peer-consensus
+- $SKILLS_DIR/codex-collab
+
+CLI:
+- $REPO_ROOT/bin/peer-forge
+- $REPO_ROOT/bin/peer-consensus
+
+Usage in Claude Code:
+- /peer-forge 你的任务描述
+- /peer-consensus 按完整双 Agent 共识协议处理这个任务：...
+EOF
+else
+  cat <<EOF
+
+peer-forge installed for Claude Code.
+
+Skills:
+- $SKILLS_DIR/$ROOT_NAME
+- $SKILLS_DIR/peer-consensus
+- $SKILLS_DIR/codex-collab
+
+CLI:
+- $REPO_ROOT/bin/peer-forge
+- $REPO_ROOT/bin/peer-consensus
+
+Usage in Claude Code:
+- /peer-forge 处理这个任务：...
+- /peer-consensus 按完整双 Agent 共识协议处理这个任务：...
+
+If Claude Code was already open, restart it once so the new skills are reloaded.
+EOF
+fi

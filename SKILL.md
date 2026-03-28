@@ -34,18 +34,20 @@ If the user only gives a task:
 
 ## What To Run
 
-If this toolkit has been installed globally into Claude Code:
+Always use the launcher layer, not a direct Python path.
+
+Global install:
 
 ```bash
-~/.peer-forge/bin/peer-forge \
+~/.claude/skills/peer-forge/bin/peer-forge \
   --repo . \
   --task "用户的原始任务"
 ```
 
-If the current project already vendors this toolkit locally:
+If the current project vendors `peer-forge` locally:
 
 ```bash
-python3 tools/peer_consensus.py \
+./.claude/skills/peer-forge/bin/peer-forge \
   --repo . \
   --task "用户的原始任务"
 ```
@@ -53,7 +55,7 @@ python3 tools/peer_consensus.py \
 If the user also gave scope, append:
 
 ```bash
-~/.peer-forge/bin/peer-forge \
+~/.claude/skills/peer-forge/bin/peer-forge \
   --repo . \
   --task "用户的原始任务" \
   --scope path/to/file1 \
@@ -63,7 +65,7 @@ If the user also gave scope, append:
 If the user gave hard constraints, append:
 
 ```bash
-~/.peer-forge/bin/peer-forge \
+~/.claude/skills/peer-forge/bin/peer-forge \
   --repo . \
   --task "用户的原始任务" \
   --acceptance "不要改 public API" \
@@ -73,13 +75,13 @@ If the user gave hard constraints, append:
 If the user wants the final approved result copied back:
 
 ```bash
-~/.peer-forge/bin/peer-forge \
+~/.claude/skills/peer-forge/bin/peer-forge \
   --repo . \
   --task "用户的原始任务" \
   --apply-final
 ```
 
-If `~/.peer-forge/bin/peer-forge` does not exist but `tools/peer_consensus.py` exists in the current project, use the local project command instead.
+If the repo is vendored locally, replace `~/.claude/skills/peer-forge` with `./.claude/skills/peer-forge`.
 
 ## How To Think
 

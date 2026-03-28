@@ -86,7 +86,7 @@ Review:
   -- "Review the current state of this file for correctness, regressions, and missing tests."
 ```
 
-If the current project vendors this toolkit locally, you can use `./.claude/skills/codex-collab/scripts/codex-headless-collab.sh` instead.
+If the current project vendors this toolkit locally, replace `~/.claude/skills/` with `./.claude/skills/`.
 
 ## Prompt Contract For Codex
 
