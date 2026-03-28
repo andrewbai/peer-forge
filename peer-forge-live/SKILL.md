@@ -18,10 +18,10 @@ This is the live counterpart to `peer-consensus`.
 
 Current scope:
 - full plan -> execute -> review -> signoff workflow
-- no apply-final into the user's main repo
 - no asymmetric supervisor notes
 - protocol automation after startup, but CLI-native safety/trust prompts remain manual on purpose
 - protocol-level read-only enforcement on non-write phases
+- package-based apply back into the target repo after approval
 
 Phase order:
 - independent plans
@@ -90,6 +90,22 @@ If the user already has a `state.json` and wants to re-attach or repair the supe
   --state-file /path/to/state.json
 ```
 
+If the user wants to preview or land an approved live run back into the repo:
+
+```bash
+~/.claude/skills/peer-forge/bin/peer-forge-live apply \
+  --state-file /path/to/state.json
+```
+
+For a real apply plus git commit:
+
+```bash
+~/.claude/skills/peer-forge/bin/peer-forge-live apply \
+  --state-file /path/to/state.json \
+  --apply \
+  --commit
+```
+
 Important startup behavior:
 
 - Do not promise a fully unattended start.
@@ -120,6 +136,13 @@ Rules:
 - Notes are queued into the next turn for both agents equally.
 - `continue` is used at phase boundaries after both sides finish a turn.
 - `status` also shows executor/reviewer, plan/execution approval state, read-only violations, current package summary, and each pane's current mode.
+
+Live apply rules:
+- `apply` without `--apply` is dry-run only.
+- Actual repo writes require `--apply`.
+- The default landing branch is `peer-forge/<run-id>`.
+- Apply is allowed only after approved plan and approved execution.
+- Apply currently requires a clean git-backed target repo.
 
 ## When To Prefer `peer-consensus`
 

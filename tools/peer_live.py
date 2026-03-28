@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import re
 import select
+import shutil
 import sys
 import time
 import traceback
@@ -49,6 +50,7 @@ from peer_consensus import (
     clip_text,
     collect_package,
     ensure_cli,
+    git,
     normalize_findings,
     prepare_workspaces,
     read_task,
@@ -83,6 +85,8 @@ def parse_args() -> argparse.Namespace:
         return parse_serve_args(sys.argv[2:])
     if len(sys.argv) > 1 and sys.argv[1] == "resume":
         return parse_resume_args(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == "apply":
+        return parse_apply_args(sys.argv[2:])
     return parse_start_args(sys.argv[1:])
 
 
@@ -184,6 +188,37 @@ def parse_resume_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def parse_apply_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Preview or apply an approved peer-forge-live execution package to the target repository.",
+    )
+    parser.set_defaults(command="apply")
+    parser.add_argument("--state-file", required=True, help="Path to an existing live run state.json file.")
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Materialize the final execution package into the target repository. Without this flag, only a dry-run preview is produced.",
+    )
+    parser.add_argument(
+        "--branch",
+        help="Target branch name for the apply step. Defaults to peer-forge/<run-id>. Use 'current' to stay on the current branch.",
+    )
+    parser.add_argument(
+        "--commit",
+        action="store_true",
+        help="Create a git commit after applying the package. Requires --apply.",
+    )
+    parser.add_argument(
+        "--allow-base-drift",
+        action="store_true",
+        help="Allow apply even if the target repository HEAD has moved since the live run started.",
+    )
+    args = parser.parse_args(argv)
+    if args.commit and not args.apply:
+        parser.error("--commit requires --apply.")
+    return args
+
+
 def sanitize_terminal_text(text: str) -> str:
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     text = OSC_RE.sub("", text)
@@ -208,7 +243,32 @@ def append_text(path: Path, text: str) -> None:
 
 
 def load_state(path: Path) -> dict[str, Any]:
-    return json.loads(path.read_text(encoding="utf-8"))
+    state = json.loads(path.read_text(encoding="utf-8"))
+    normalize_state(state)
+    return state
+
+
+def normalize_state(state: dict[str, Any]) -> None:
+    state.setdefault("current_phase", "")
+    state.setdefault("selected_executor", "")
+    state.setdefault("selected_reviewer", "")
+    state.setdefault("final_plan", None)
+    state.setdefault("current_execution_package", None)
+    state.setdefault("execution_packages", [])
+    state.setdefault("read_only_violations", [])
+    state.setdefault("manual_confirmations_expected", [])
+    state.setdefault("notes", [])
+    state.setdefault("turns", [])
+    state.setdefault("summary", {})
+    state.setdefault("logs", {})
+    state.setdefault("agents", {})
+    state.setdefault("apply_attempts", [])
+    state["summary"].setdefault("apply_status", "not-applied")
+    state["summary"].setdefault("applied_branch", "")
+    state["summary"].setdefault("applied_commit", "")
+    state["summary"].setdefault("last_apply_report", "")
+    state["summary"].setdefault("last_apply_attempt_id", "")
+    state["agents"].setdefault("supervisor", {"pane_id": ""})
 
 
 def save_state(state: dict[str, Any]) -> None:
@@ -1221,6 +1281,7 @@ def build_report(state: dict[str, Any]) -> dict[str, Any]:
         "final_plan": state.get("final_plan"),
         "current_execution_package": state.get("current_execution_package"),
         "execution_packages": state.get("execution_packages", []),
+        "apply_attempts": state.get("apply_attempts", []),
         "read_only_violations": state.get("read_only_violations", []),
         "manual_confirmations_expected": state.get("manual_confirmations_expected", []),
         "workspaces": state.get("workspaces", {}),
@@ -1261,6 +1322,7 @@ def report_markdown(data: dict[str, Any]) -> str:
     plan_approved = bool(summary.get("plan_approved", False))
     execution_approved = bool(summary.get("execution_approved", False))
     final_approved = bool(summary.get("final_approved", False))
+    apply_attempts = data.get("apply_attempts", [])
     lines = [
         f"# Peer Forge Live Run {data['run_id']}",
         "",
@@ -1274,6 +1336,9 @@ def report_markdown(data: dict[str, Any]) -> str:
         f"- Final plan base: `{summary.get('final_plan_base', '')}`",
         f"- Selected executor: `{data.get('selected_executor', '')}`",
         f"- Selected reviewer: `{data.get('selected_reviewer', '')}`",
+        f"- Apply status: `{summary.get('apply_status', 'not-applied')}`",
+        f"- Applied branch: `{summary.get('applied_branch', '')}`",
+        f"- Applied commit: `{summary.get('applied_commit', '')}`",
         f"- Read-only violations: `{len(data.get('read_only_violations', []))}`",
         f"- Run dir: `{data['run_dir']}`",
         "",
@@ -1309,6 +1374,14 @@ def report_markdown(data: dict[str, Any]) -> str:
         )
     else:
         lines.append("- None")
+    lines.extend(["", "## Apply Attempts"])
+    if apply_attempts:
+        lines.extend(
+            f"- `{item.get('attempt_id', '')}` `{item.get('status', '')}` branch=`{item.get('target_branch', '')}` commit=`{item.get('commit_sha', '')}`"
+            for item in apply_attempts
+        )
+    else:
+        lines.append("- None")
     lines.extend(["", "## Turns"])
     for turn in data.get("turns", []):
         lines.append(f"- `{turn['id']}` `{turn['mode']}` `{turn['status']}`")
@@ -1319,6 +1392,176 @@ def persist_report(state: dict[str, Any]) -> None:
     data = build_report(state)
     write_json(report_path(state), data)
     write_text(report_md_path(state), report_markdown(data))
+
+
+def apply_root(state: dict[str, Any]) -> Path:
+    return Path(state["run_dir"]) / "apply"
+
+
+def apply_history_path(state: dict[str, Any]) -> Path:
+    return apply_root(state) / "history.jsonl"
+
+
+def apply_report_json_path(state: dict[str, Any], attempt_id: str) -> Path:
+    return apply_root(state) / f"{attempt_id}-report.json"
+
+
+def apply_report_md_path(state: dict[str, Any], attempt_id: str) -> Path:
+    return apply_root(state) / f"{attempt_id}-report.md"
+
+
+def normalized_rel_path(rel: str) -> str:
+    rel_path = Path(rel)
+    if rel_path.is_absolute():
+        raise RuntimeError(f"Package path must be relative: {rel}")
+    parts = rel_path.parts
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        raise RuntimeError(f"Package path is not safe: {rel}")
+    return rel_path.as_posix()
+
+
+def current_branch_name(repo: Path) -> str:
+    proc = git(repo, "symbolic-ref", "--quiet", "--short", "HEAD", check=False)
+    if proc.returncode != 0:
+        return ""
+    return proc.stdout.strip()
+
+
+def branch_exists(repo: Path, branch: str) -> bool:
+    proc = git(repo, "show-ref", "--verify", "--quiet", f"refs/heads/{branch}", check=False)
+    return proc.returncode == 0
+
+
+def git_status_porcelain(repo: Path, paths: list[str] | None = None) -> list[str]:
+    cmd = ["status", "--porcelain"]
+    if paths:
+        cmd.extend(["--", *paths])
+    proc = git(repo, *cmd)
+    return [line for line in proc.stdout.splitlines() if line.strip()]
+
+
+def package_files_root(package: dict[str, Any]) -> Path:
+    return Path(package["package_dir"]) / "files"
+
+
+def load_execution_manifest(package: dict[str, Any]) -> dict[str, Any]:
+    manifest_path = package_manifest_path(package)
+    if not manifest_path.exists():
+        raise RuntimeError(f"Execution package manifest is missing: {manifest_path}")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(manifest, dict):
+        raise RuntimeError(f"Execution package manifest is not an object: {manifest_path}")
+    changed_files = [normalized_rel_path(str(item)) for item in manifest.get("changed_files", [])]
+    copied_files = [normalized_rel_path(str(item)) for item in manifest.get("copied_files", [])]
+    deleted_files = [normalized_rel_path(str(item)) for item in manifest.get("deleted_files", [])]
+    changed_set = set(changed_files)
+    if any(path not in changed_set for path in copied_files + deleted_files):
+        raise RuntimeError(f"Execution package manifest has inconsistent copied/deleted paths: {manifest_path}")
+    overlap = set(copied_files) & set(deleted_files)
+    if overlap:
+        raise RuntimeError(f"Execution package manifest marks the same path as copied and deleted: {sorted(overlap)!r}")
+    files_root = package_files_root(package)
+    for rel in copied_files:
+        source = files_root / rel
+        if not source.exists():
+            raise RuntimeError(f"Execution package is missing copied file payload: {source}")
+        if not source.is_file():
+            raise RuntimeError(f"Execution package payload is not a regular file: {source}")
+    return {
+        "changed_files": changed_files,
+        "copied_files": copied_files,
+        "deleted_files": deleted_files,
+    }
+
+
+def apply_attempt_markdown(data: dict[str, Any]) -> str:
+    lines = [
+        f"# Peer Forge Live Apply {data['attempt_id']}",
+        "",
+        f"- Run: `{data['run_id']}`",
+        f"- Status: `{data['status']}`",
+        f"- Apply requested: `{data['apply_requested']}`",
+        f"- Commit requested: `{data['commit_requested']}`",
+        f"- Repo: `{data['repo']}`",
+        f"- State file: `{data['state_file']}`",
+        f"- Package dir: `{data['package_dir']}`",
+        f"- Manifest: `{data['manifest_path']}`",
+        f"- Diff: `{data['diff_path']}`",
+        f"- Target branch: `{data['target_branch']}`",
+        f"- Original branch: `{data.get('original_branch', '')}`",
+        f"- Commit SHA: `{data.get('commit_sha', '')}`",
+        "",
+        "## Package",
+        f"- Changed files: `{len(data.get('changed_files', []))}`",
+        f"- Copied files: `{len(data.get('copied_files', []))}`",
+        f"- Deleted files: `{len(data.get('deleted_files', []))}`",
+        "",
+        "## Blockers",
+    ]
+    blockers = data.get("blockers", [])
+    if blockers:
+        lines.extend(f"- {item}" for item in blockers)
+    else:
+        lines.append("- None")
+    lines.extend(["", "## Warnings"])
+    warnings = data.get("warnings", [])
+    if warnings:
+        lines.extend(f"- {item}" for item in warnings)
+    else:
+        lines.append("- None")
+    lines.extend(["", "## Actions"])
+    actions = data.get("actions", [])
+    if actions:
+        lines.extend(f"- {item}" for item in actions)
+    else:
+        lines.append("- None")
+    return "\n".join(lines) + "\n"
+
+
+def persist_apply_attempt(state: dict[str, Any], report: dict[str, Any]) -> None:
+    attempt_id = str(report["attempt_id"])
+    json_path = apply_report_json_path(state, attempt_id)
+    md_path = apply_report_md_path(state, attempt_id)
+    report["report_json"] = str(json_path)
+    report["report_md"] = str(md_path)
+    write_json(json_path, report)
+    write_text(md_path, apply_attempt_markdown(report))
+    append_text(apply_history_path(state), json.dumps(report, ensure_ascii=True) + "\n")
+    state.setdefault("apply_attempts", []).append(
+        {
+            "attempt_id": attempt_id,
+            "status": report.get("status", ""),
+            "target_branch": report.get("target_branch", ""),
+            "commit_sha": report.get("commit_sha", ""),
+            "report_json": str(json_path),
+            "report_md": str(md_path),
+            "created_at": report.get("created_at", ""),
+        }
+    )
+    state["summary"]["apply_status"] = str(report.get("status", "not-applied"))
+    state["summary"]["applied_branch"] = str(report.get("target_branch", ""))
+    state["summary"]["applied_commit"] = str(report.get("commit_sha", ""))
+    state["summary"]["last_apply_report"] = str(json_path)
+    state["summary"]["last_apply_attempt_id"] = attempt_id
+    save_state(state)
+    persist_report(state)
+
+
+def materialize_execution_package(repo: Path, package: dict[str, Any], manifest: dict[str, Any]) -> None:
+    files_root = package_files_root(package)
+    for rel in manifest["copied_files"]:
+        src = files_root / rel
+        dst = repo / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+    for rel in manifest["deleted_files"]:
+        dst = repo / rel
+        if dst.exists():
+            dst.unlink()
+
+
+def default_apply_branch(state: dict[str, Any]) -> str:
+    return f"peer-forge/{state['run_id']}"
 
 
 def initialize_state(args: argparse.Namespace, *, repo: Path, task: str, run_dir: Path, session_name: str) -> dict[str, Any]:
@@ -1348,6 +1591,7 @@ def initialize_state(args: argparse.Namespace, *, repo: Path, task: str, run_dir
         "current_execution_package": None,
         "execution_packages": [],
         "read_only_violations": [],
+        "apply_attempts": [],
         "manual_confirmations_expected": [
             "Claude may ask you to confirm entering bypassPermissions mode.",
             "Codex may ask you to trust the generated workspace before proceeding.",
@@ -2082,6 +2326,187 @@ def resume_mode(args: argparse.Namespace) -> int:
     return 0
 
 
+def apply_mode(args: argparse.Namespace) -> int:
+    ensure_cli("git")
+    state_file = Path(args.state_file).resolve()
+    if not state_file.exists():
+        raise SystemExit(f"State file does not exist: {state_file}")
+    state = load_state(state_file)
+    repo = Path(state["repo"]).resolve()
+    summary = state.get("summary", {})
+    package = current_execution_package(state)
+    if package is None:
+        packages = state.get("execution_packages", [])
+        if packages:
+            package = packages[-1]
+    attempt_id = utc_now()
+    blockers: list[str] = []
+    warnings: list[str] = []
+    actions: list[str] = []
+    commit_sha = ""
+    original_branch = ""
+    current_head = ""
+    expected_head = str(state.get("workspaces", {}).get("initial_commit") or "")
+    target_branch_arg = (args.branch or "").strip()
+    branch_mode = "new"
+    target_branch = target_branch_arg or default_apply_branch(state)
+    report: dict[str, Any] = {}
+
+    try:
+        if not repo.exists():
+            blockers.append(f"Target repository does not exist: {repo}")
+        if state.get("status") in {"starting", "running"}:
+            blockers.append(f"Live run is still active: status={state.get('status')}")
+        if not summary.get("plan_approved", False):
+            blockers.append("Live run has not reached an approved final plan.")
+        if not summary.get("execution_approved", False):
+            blockers.append("Live run does not have an approved execution result.")
+        if not state.get("workspaces", {}).get("git_mode", False):
+            blockers.append("Live apply currently supports only git-backed live runs.")
+        if package is None:
+            blockers.append("No execution package is available in state.json.")
+
+        manifest: dict[str, Any] = {"changed_files": [], "copied_files": [], "deleted_files": []}
+        if package is not None:
+            manifest = load_execution_manifest(package)
+            actions.append(f"materialize {len(manifest['copied_files'])} copied files from package")
+            if manifest["deleted_files"]:
+                actions.append(f"delete {len(manifest['deleted_files'])} files from package manifest")
+            if not manifest["changed_files"]:
+                warnings.append("Execution package is empty; apply may become a no-op.")
+
+        if repo.exists():
+            top = git(repo, "rev-parse", "--show-toplevel", check=False)
+            if top.returncode != 0:
+                blockers.append(f"Target path is not a git repository: {repo}")
+            else:
+                resolved_top = Path(top.stdout.strip()).resolve()
+                if resolved_top != repo:
+                    blockers.append(f"State repo path does not match git toplevel: state={repo} git={resolved_top}")
+                current_head = git(repo, "rev-parse", "HEAD").stdout.strip()
+                original_branch = current_branch_name(repo)
+                dirty = git_status_porcelain(repo)
+                if dirty:
+                    blockers.append("Target repository has uncommitted changes; live apply requires a clean worktree.")
+                if expected_head and current_head != expected_head:
+                    if args.allow_base_drift:
+                        warnings.append(
+                            f"Target HEAD drift accepted by flag: expected {expected_head}, current {current_head}."
+                        )
+                    else:
+                        blockers.append(
+                            f"Target HEAD drift detected: expected {expected_head}, current {current_head}. Use --allow-base-drift to override."
+                        )
+
+        if target_branch == "current":
+            branch_mode = "current"
+            if not original_branch:
+                blockers.append("Applying to 'current' requires the repository to be on a named branch.")
+            target_branch = original_branch or "current"
+            actions.append(f"apply on current branch {target_branch}")
+        else:
+            actions.append(f"create branch {target_branch}")
+            if repo.exists() and branch_exists(repo, target_branch):
+                blockers.append(f"Target branch already exists: {target_branch}")
+
+        if args.commit:
+            actions.append("create a git commit after apply")
+
+        report = {
+            "attempt_id": attempt_id,
+            "created_at": utc_timestamp_precise(),
+            "run_id": state["run_id"],
+            "state_file": str(state_file),
+            "repo": str(repo),
+            "status": "blocked" if blockers else ("preview" if not args.apply else "ready"),
+            "apply_requested": bool(args.apply),
+            "commit_requested": bool(args.commit),
+            "target_branch": target_branch,
+            "branch_mode": branch_mode,
+            "original_branch": original_branch,
+            "current_head": current_head,
+            "expected_base_commit": expected_head,
+            "package_dir": str(package.get("package_dir", "")) if package else "",
+            "manifest_path": str(package_manifest_path(package)) if package else "",
+            "diff_path": str(package_diff_path(package)) if package else "",
+            "changed_files": list(manifest.get("changed_files", [])),
+            "copied_files": list(manifest.get("copied_files", [])),
+            "deleted_files": list(manifest.get("deleted_files", [])),
+            "blockers": blockers,
+            "warnings": warnings,
+            "actions": actions,
+            "commit_sha": "",
+        }
+        if blockers or not args.apply:
+            persist_apply_attempt(state, report)
+            print(json.dumps(report, indent=2, ensure_ascii=True))
+            return 1 if blockers else 0
+
+        branch_created = False
+        if branch_mode == "new":
+            git(repo, "switch", "-c", target_branch)
+            branch_created = True
+
+        materialize_execution_package(repo, package, manifest)
+        path_changes = git_status_porcelain(repo, manifest["changed_files"])
+        if not path_changes:
+            report["status"] = "noop"
+            warnings.append("Applying the execution package produced no repository changes.")
+        elif args.commit:
+            git(repo, "add", "-A", "--", *manifest["changed_files"])
+            commit_message = f"Apply peer-forge-live run {state['run_id']}"
+            commit_body = (
+                f"Task: {state['task']}\n"
+                f"State: {state_file}\n"
+                f"Package: {package['package_dir']}\n"
+                f"Report: {report_path(state)}\n"
+            )
+            git(repo, "commit", "-m", commit_message, "-m", commit_body)
+            commit_sha = git(repo, "rev-parse", "HEAD").stdout.strip()
+            report["status"] = "committed"
+        else:
+            report["status"] = "applied"
+
+        report["branch_created"] = branch_created
+        report["commit_sha"] = commit_sha
+        persist_apply_attempt(state, report)
+        print(json.dumps(report, indent=2, ensure_ascii=True))
+        return 0
+    except Exception as exc:
+        if not report:
+            report = {
+                "attempt_id": attempt_id,
+                "created_at": utc_timestamp_precise(),
+                "run_id": state.get("run_id", ""),
+                "state_file": str(state_file),
+                "repo": str(repo),
+                "status": "failed",
+                "apply_requested": bool(args.apply),
+                "commit_requested": bool(args.commit),
+                "target_branch": target_branch,
+                "branch_mode": branch_mode,
+                "original_branch": original_branch,
+                "current_head": current_head,
+                "expected_base_commit": expected_head,
+                "package_dir": str(package.get("package_dir", "")) if package else "",
+                "manifest_path": str(package_manifest_path(package)) if package else "",
+                "diff_path": str(package_diff_path(package)) if package else "",
+                "changed_files": [],
+                "copied_files": [],
+                "deleted_files": [],
+                "blockers": [],
+                "warnings": [],
+                "actions": actions,
+                "commit_sha": "",
+            }
+        report["status"] = "failed"
+        report.setdefault("errors", [])
+        report["errors"].append(f"{type(exc).__name__}: {exc}")
+        persist_apply_attempt(state, report)
+        print(json.dumps(report, indent=2, ensure_ascii=True))
+        return 1
+
+
 def start_mode(args: argparse.Namespace) -> int:
     ensure_cli("claude")
     ensure_cli("codex")
@@ -2230,6 +2655,8 @@ def main() -> int:
         return serve_mode(args)
     if getattr(args, "command", "") == "resume":
         return resume_mode(args)
+    if getattr(args, "command", "") == "apply":
+        return apply_mode(args)
     return start_mode(args)
 
 

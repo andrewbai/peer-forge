@@ -47,6 +47,7 @@ peer-forge/
 │   ├── peer-forge-live
 │   └── peer-forge-upgrade
 ├── scripts/
+│   ├── live-apply-smoke.sh
 │   └── live-smoke.sh
 ├── setup
 ├── uninstall
@@ -146,6 +147,22 @@ live tmux 模式：
   --state-file /path/to/state.json
 ```
 
+预览一个已批准的 live run 会如何落回目标仓库：
+
+```bash
+~/.claude/skills/peer-forge/bin/peer-forge-live apply \
+  --state-file /path/to/state.json
+```
+
+真正 apply，并且自动 commit 到新分支：
+
+```bash
+~/.claude/skills/peer-forge/bin/peer-forge-live apply \
+  --state-file /path/to/state.json \
+  --apply \
+  --commit
+```
+
 ## 环境要求
 
 - 已安装并登录 `claude` CLI
@@ -201,6 +218,7 @@ git --version
 - 用 tmux 分 pane 同时看 Claude、Codex、supervisor
 - 只允许对称 supervisor note
 - 非写阶段由协议层强制做只读校验
+- 在双方批准后，可把最终 execution package 安全落回目标仓库
 
 当前 live 阶段顺序：
 
@@ -246,6 +264,22 @@ supervisor pane 里的主要命令：
   --state-file <target-repo>/.claude/tmp/peer-forge-live/<run-id>/state.json
 ```
 
+如果 live run 已结束，而且 plan / execution 都批准了，就可以预览或 apply 最终 execution package：
+
+```bash
+~/.claude/skills/peer-forge/bin/peer-forge-live apply \
+  --state-file <target-repo>/.claude/tmp/peer-forge-live/<run-id>/state.json
+```
+
+apply 语义：
+
+- 不带 `--apply` 时，只做 dry-run 预览，不改仓库。
+- 真正写入必须显式传 `--apply`。
+- 默认会落到 `peer-forge/<run-id>` 新分支。
+- `--commit` 会在 apply 完成后自动创建 git commit。
+- 当前 live apply 只支持 git-backed 的 live run，而且目标仓库必须是 clean worktree。
+- 默认如果目标仓库的 HEAD 相比 live run 启动时已经漂移，会直接拒绝 apply。
+
 每次 live run 的产物会写到：
 
 ```text
@@ -264,10 +298,14 @@ supervisor pane 里的主要命令：
 - `turns/<turn-id>/...`
 - `report.json`
 - `report.md`
+- `apply/history.jsonl`
+- `apply/<timestamp>-report.json`
+- `apply/<timestamp>-report.md`
 
 另外，仓库里还带了一个用于验证 live 启动和 supervisor 恢复链路的 smoke 脚本：
 
 - `scripts/live-smoke.sh`
+- `scripts/live-apply-smoke.sh`
 
 ## 运行产物
 

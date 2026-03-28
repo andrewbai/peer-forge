@@ -44,6 +44,7 @@ peer-forge/
 │   ├── peer-forge-live
 │   └── peer-forge-upgrade
 ├── scripts/
+│   ├── live-apply-smoke.sh
 │   └── live-smoke.sh
 ├── setup
 ├── uninstall
@@ -143,6 +144,22 @@ Resume or re-attach to an existing live run:
   --state-file /path/to/state.json
 ```
 
+Preview how an approved live run would land back into the target repo:
+
+```bash
+~/.claude/skills/peer-forge/bin/peer-forge-live apply \
+  --state-file /path/to/state.json
+```
+
+Actually apply and commit onto a new branch:
+
+```bash
+~/.claude/skills/peer-forge/bin/peer-forge-live apply \
+  --state-file /path/to/state.json \
+  --apply \
+  --commit
+```
+
 ## Requirements
 
 - `claude` CLI installed and logged in
@@ -195,6 +212,7 @@ Current live scope:
 - tmux panes for Claude, Codex, and the supervisor
 - symmetric supervisor notes only
 - protocol-level read-only enforcement for non-write phases
+- package-based landing back into the target repo after approval
 
 Current live phase flow:
 
@@ -240,6 +258,22 @@ If the supervisor pane dies or you detach and want to repair the session in plac
   --state-file <target-repo>/.claude/tmp/peer-forge-live/<run-id>/state.json
 ```
 
+If the live run finished and both plan and execution are approved, you can preview or apply the final execution package:
+
+```bash
+~/.claude/skills/peer-forge/bin/peer-forge-live apply \
+  --state-file <target-repo>/.claude/tmp/peer-forge-live/<run-id>/state.json
+```
+
+Apply semantics:
+
+- `apply` without `--apply` is a dry-run preview only.
+- Real writes require `--apply`.
+- The default landing branch is `peer-forge/<run-id>`.
+- `--commit` creates a git commit after applying the package.
+- Live apply currently supports only git-backed live runs with a clean target worktree.
+- By default, apply refuses to run if the target repo HEAD has drifted since the live run started.
+
 Each live run writes artifacts under:
 
 ```text
@@ -258,10 +292,14 @@ That includes:
 - `turns/<turn-id>/...`
 - `report.json`
 - `report.md`
+- `apply/history.jsonl`
+- `apply/<timestamp>-report.json`
+- `apply/<timestamp>-report.md`
 
 Manual smoke coverage for live startup and supervisor recovery is included in:
 
 - `scripts/live-smoke.sh`
+- `scripts/live-apply-smoke.sh`
 
 ## Artifacts
 
