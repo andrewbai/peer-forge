@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.9.0 - 2026-03-29
+
+Supervisor visibility and checkpoint control.
+
+- Added `--supervise` for live Claude/Codex streaming to the terminal plus run-level `supervisor.log` and per-stage `verbose.log`.
+- Added stage summaries, structured supervise metadata, and supervisor log paths to `report.json` and `report.md`.
+- Added `--supervise-checkpoints` for stage-boundary `continue`, `inspect`, and `abort` control without changing the peer-consensus protocol.
+- Added checkpoint audit artifacts under `checkpoints/`, including per-checkpoint JSON files and `history.jsonl`.
+- Updated the English and Chinese docs for supervision modes, runtime artifacts, and aborted-run reporting.
+
 ## v0.8.0 - 2026-03-28
 
 Runtime observability and failure reporting.
