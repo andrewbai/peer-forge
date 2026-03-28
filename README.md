@@ -101,7 +101,7 @@ Useful runtime flags:
 
 - `--agent-timeout-seconds 1800` sets a per-stage Claude/Codex timeout. Use `0` to disable it.
 - `--supervise` streams Claude/Codex output to the terminal and writes prefixed verbose logs without changing the protocol.
-- `--supervise-checkpoints` adds interactive stage-boundary checkpoints on top of `--supervise`. It supports `continue`, `inspect`, and `abort`, and requires `--task` or `--task-file`.
+- `--supervise-checkpoints` adds interactive stage-boundary checkpoints on top of `--supervise`. It supports `continue`, `inspect`, `note`, and `abort`, and requires `--task` or `--task-file`.
 - `--cleanup-workspaces` removes the temporary isolated workspaces after the run.
 - `--keep-workspaces` keeps those isolated workspaces even when cleanup is enabled. `--keep-run-dir` remains as a deprecated alias.
 
@@ -170,6 +170,7 @@ That directory includes:
 - `progress.log`
 - `supervisor.log` when `--supervise` is enabled
 - `checkpoints/history.jsonl` when `--supervise-checkpoints` is enabled
+- `notes/history.jsonl` when supervisor notes are added
 - isolated workspaces
 - prompts
 - model outputs
@@ -185,11 +186,12 @@ Runtime behavior:
 - The same progress lines are also written to `progress.log` inside the run directory.
 - With `--supervise`, Claude/Codex stdout and stderr are streamed live to the terminal with prefixes and mirrored into a run-level `supervisor.log`.
 - With `--supervise`, each stage also gets a prefixed `<stage-dir>/verbose.log` alongside the raw `stdout.txt` and `stderr.txt`.
-- With `--supervise-checkpoints`, the run pauses after each major stage boundary. You can `continue`, `inspect`, or `abort` without changing the agent protocol or workspace isolation.
-- `inspect` prints the current stage artifact paths, including `parsed.json`, `stdout.txt`, `stderr.txt`, `verbose.log` when present, and diff package paths for write stages.
+- With `--supervise-checkpoints`, the run pauses after each major stage boundary. You can `continue`, `inspect`, `note`, or `abort` without changing the agent protocol or workspace isolation.
+- `note` records a symmetric supervisor note that is injected into both agents' later prompts. Multi-line note entry ends with a line containing only `---`.
+- `inspect` prints the current stage artifact paths, active supervisor notes, `parsed.json`, `stdout.txt`, `stderr.txt`, `verbose.log` when present, and diff package paths for write stages.
 - Final machine-readable output stays on `stdout` as JSON.
 - `report.json` and `report.md` are written for completed, aborted, and failed runs.
-- `report.json` includes `progress_log`, `supervisor_log`, `checkpoint_history`, `checkpoint_events`, and structured `stage_timings` entries for each Claude/Codex stage.
+- `report.json` includes `progress_log`, `supervisor_log`, `checkpoint_history`, `checkpoint_events`, `notes_history`, `supervisor_notes`, and structured `stage_timings` entries for each Claude/Codex stage.
 
 ## Skills
 

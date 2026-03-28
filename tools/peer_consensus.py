@@ -230,8 +230,11 @@ class StageRun:
 class CheckpointState:
     enabled: bool
     history_path: Path
+    notes_history_path: Path
     events: list[dict[str, Any]] = field(default_factory=list)
+    notes: list[dict[str, Any]] = field(default_factory=list)
     next_index: int = 1
+    next_note_index: int = 1
 
 
 class RunAborted(RuntimeError):
@@ -573,7 +576,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--supervise-checkpoints",
         action="store_true",
-        help="Pause at stage boundaries for supervisor commands (continue, inspect, abort). Implies --supervise.",
+        help="Pause at stage boundaries for supervisor commands (continue, inspect, note, abort). Implies --supervise.",
     )
     parser.add_argument(
         "--cleanup-workspaces",
@@ -972,7 +975,53 @@ def prompt_header(task: str, acceptance: list[str], scope: list[str]) -> str:
     ).strip()
 
 
-def build_plan_prompt(agent: str, task: str, acceptance: list[str], scope: list[str]) -> str:
+def note_summary(note: dict[str, Any], limit: int = 120) -> str:
+    return clip_text(str(note.get("text", "")), limit=limit)
+
+
+def supervisor_notes_block(supervisor_notes: list[dict[str, Any]]) -> str:
+    if not supervisor_notes:
+        return ""
+    rendered_notes: list[str] = []
+    for note in supervisor_notes:
+        body = textwrap.indent(str(note.get("text", "")).strip(), "  ")
+        rendered_notes.append(
+            "\n".join(
+                [
+                    f"[{note.get('id', '')}] Added at checkpoint {note.get('checkpoint_id', '')}; applies from {note.get('applies_from_phase', '')}:",
+                    body or "  (empty)",
+                ]
+            )
+        )
+    notes_body = "\n\n".join(rendered_notes)
+    return textwrap.dedent(
+        f"""
+        Supervisor Notes:
+        - These notes come from the human supervisor and apply symmetrically to both agents.
+        - They supplement the task and acceptance criteria but do not override hard constraints such as workspace isolation, read-only phases, or the no-commit rule.
+        - Incorporate them from this phase onward.
+
+        {notes_body}
+        """
+    ).strip()
+
+
+def prompt_context(task: str, acceptance: list[str], scope: list[str], supervisor_notes: list[dict[str, Any]]) -> str:
+    header = prompt_header(task, acceptance, scope)
+    notes_block = supervisor_notes_block(supervisor_notes)
+    if not notes_block:
+        return header
+    return f"{header}\n\n{notes_block}"
+
+
+def build_plan_prompt(
+    agent: str,
+    task: str,
+    acceptance: list[str],
+    scope: list[str],
+    supervisor_notes: list[dict[str, Any]] | None = None,
+) -> str:
+    context_block = prompt_context(task, acceptance, scope, supervisor_notes or [])
     return textwrap.dedent(
         f"""
         You are {agent} in a dual-agent peer consensus protocol.
@@ -980,7 +1029,7 @@ def build_plan_prompt(agent: str, task: str, acceptance: list[str], scope: list[
         This phase is plan-only. Do not modify code. Do not create commits, branches, or tags.
         Produce the best implementation plan you can, as if the other agent does not exist.
 
-        {prompt_header(task, acceptance, scope)}
+        {context_block}
 
         Instructions:
         - Work only inside this isolated workspace.
@@ -1000,14 +1049,16 @@ def build_plan_review_prompt(
     acceptance: list[str],
     scope: list[str],
     peer_plan: dict[str, Any],
+    supervisor_notes: list[dict[str, Any]] | None = None,
 ) -> str:
+    context_block = prompt_context(task, acceptance, scope, supervisor_notes or [])
     return textwrap.dedent(
         f"""
         You are {reviewer} reviewing {peer}'s implementation plan in a dual-agent peer consensus protocol.
 
         Review only. Do not modify your workspace.
 
-        {prompt_header(task, acceptance, scope)}
+        {context_block}
 
         Peer plan:
         {json.dumps(peer_plan, indent=2, ensure_ascii=True)}
@@ -1031,14 +1082,16 @@ def build_plan_revision_prompt(
     acceptance: list[str],
     scope: list[str],
     peer_review: dict[str, Any],
+    supervisor_notes: list[dict[str, Any]] | None = None,
 ) -> str:
+    context_block = prompt_context(task, acceptance, scope, supervisor_notes or [])
     return textwrap.dedent(
         f"""
         You are {agent} revising your own implementation plan after reading {peer}'s review.
 
         This is still a plan-only phase. Do not modify code. Do not create commits, branches, or tags.
 
-        {prompt_header(task, acceptance, scope)}
+        {context_block}
 
         Peer review of your work:
         {json.dumps(peer_review, indent=2, ensure_ascii=True)}
@@ -1060,14 +1113,16 @@ def build_plan_consensus_prompt(
     scope: list[str],
     own_revision: dict[str, Any],
     peer_revision: dict[str, Any],
+    supervisor_notes: list[dict[str, Any]] | None = None,
 ) -> str:
+    context_block = prompt_context(task, acceptance, scope, supervisor_notes or [])
     return textwrap.dedent(
         f"""
         You are {agent} deciding which revised implementation plan should become the final plan base.
 
         Do not modify your workspace.
 
-        {prompt_header(task, acceptance, scope)}
+        {context_block}
 
         Your revised summary:
         {json.dumps(own_revision, indent=2, ensure_ascii=True)}
@@ -1095,14 +1150,16 @@ def build_final_plan_prompt(
     merge_brief: dict[str, Any],
     own_revision: dict[str, Any],
     peer_revision: dict[str, Any],
+    supervisor_notes: list[dict[str, Any]] | None = None,
 ) -> str:
+    context_block = prompt_context(task, acceptance, scope, supervisor_notes or [])
     return textwrap.dedent(
         f"""
         You are {base_agent}. Your revised plan is the starting point for the final implementation plan.
 
         This is still a plan-only phase. Do not modify code. Produce the final agreed implementation plan.
 
-        {prompt_header(task, acceptance, scope)}
+        {context_block}
 
         Your revised summary:
         {json.dumps(own_revision, indent=2, ensure_ascii=True)}
@@ -1128,7 +1185,9 @@ def build_execute_prompt(
     acceptance: list[str],
     scope: list[str],
     final_plan: dict[str, Any],
+    supervisor_notes: list[dict[str, Any]] | None = None,
 ) -> str:
+    context_block = prompt_context(task, acceptance, scope, supervisor_notes or [])
     return textwrap.dedent(
         f"""
         You are {agent} executing the agreed final plan.
@@ -1136,7 +1195,7 @@ def build_execute_prompt(
         This is the code-writing phase. Modify code only inside this isolated workspace.
         Do not create commits, branches, or tags.
 
-        {prompt_header(task, acceptance, scope)}
+        {context_block}
 
         Final plan:
         {json.dumps(final_plan, indent=2, ensure_ascii=True)}
@@ -1161,14 +1220,16 @@ def build_execution_review_prompt(
     final_plan: dict[str, Any],
     execution_summary: dict[str, Any],
     execution_package: Path,
+    supervisor_notes: list[dict[str, Any]] | None = None,
 ) -> str:
+    context_block = prompt_context(task, acceptance, scope, supervisor_notes or [])
     return textwrap.dedent(
         f"""
         You are {reviewer} reviewing {executor}'s implementation against the agreed final plan.
 
         Review only. Do not modify your workspace.
 
-        {prompt_header(task, acceptance, scope)}
+        {context_block}
 
         Final plan:
         {json.dumps(final_plan, indent=2, ensure_ascii=True)}
@@ -1200,7 +1261,9 @@ def build_execution_fix_prompt(
     scope: list[str],
     final_plan: dict[str, Any],
     review_feedback: dict[str, Any],
+    supervisor_notes: list[dict[str, Any]] | None = None,
 ) -> str:
+    context_block = prompt_context(task, acceptance, scope, supervisor_notes or [])
     return textwrap.dedent(
         f"""
         You are {agent} updating the implementation after peer review.
@@ -1208,7 +1271,7 @@ def build_execution_fix_prompt(
         This is still the execution phase. Modify code only inside this isolated workspace.
         Do not create commits, branches, or tags.
 
-        {prompt_header(task, acceptance, scope)}
+        {context_block}
 
         Final plan:
         {json.dumps(final_plan, indent=2, ensure_ascii=True)}
@@ -1288,6 +1351,18 @@ def checkpoint_stage_record(stage: StageRun) -> dict[str, Any]:
     return record
 
 
+def supervisor_note_record(note: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": note.get("id", ""),
+        "checkpoint_id": note.get("checkpoint_id", ""),
+        "created_at": note.get("created_at", ""),
+        "applies_from_phase": note.get("applies_from_phase", ""),
+        "status": note.get("status", ""),
+        "summary": note_summary(note),
+        "record_file": note.get("record_file", ""),
+    }
+
+
 def format_changed_files_preview(changed_files: list[str], limit: int = 5) -> str:
     if not changed_files:
         return "none"
@@ -1303,12 +1378,23 @@ def format_checkpoint_inspection(
     description: str,
     run_dir: Path,
     stages: list[StageRun],
+    active_notes: list[dict[str, Any]],
+    notes_history_path: Path,
 ) -> list[str]:
     lines = [
         f"{checkpoint_id}: {description}",
         f"Run dir: {run_dir}",
         f"Stages: {len(stages)}",
     ]
+    if active_notes:
+        lines.append(f"Active supervisor notes: {len(active_notes)}")
+        lines.append(f"Notes history: {notes_history_path}")
+        for note in active_notes:
+            lines.append(
+                f"  {note.get('id', '')}: applies_from={note.get('applies_from_phase', '')} summary=\"{note_summary(note)}\""
+            )
+    else:
+        lines.append("Active supervisor notes: none")
     for index, stage in enumerate(stages, start=1):
         mode_label = "read-only" if stage.read_only else "write"
         lines.extend(
@@ -1353,6 +1439,31 @@ def read_supervisor_command(prompt: str) -> str:
     return line.strip()
 
 
+def read_supervisor_note(checkpoint_id: str) -> str | None:
+    log_checkpoint(f"{checkpoint_id}: enter supervisor note text. Finish with a line containing only ---")
+    lines: list[str] = []
+    while True:
+        try:
+            line = sys.stdin.readline()
+        except KeyboardInterrupt:
+            print("", file=sys.stderr, flush=True)
+            log_checkpoint(f"{checkpoint_id}: note entry cancelled.")
+            return None
+        if line == "":
+            print("", file=sys.stderr, flush=True)
+            log_checkpoint(f"{checkpoint_id}: note entry cancelled because stdin closed.")
+            return None
+        stripped = line.rstrip("\n")
+        if stripped.strip() == "---":
+            break
+        lines.append(stripped)
+    note_text = "\n".join(lines).strip()
+    if not note_text:
+        log_checkpoint(f"{checkpoint_id}: empty note discarded.")
+        return None
+    return note_text
+
+
 def run_supervisor_checkpoint(
     checkpoint_state: CheckpointState,
     *,
@@ -1360,6 +1471,7 @@ def run_supervisor_checkpoint(
     description: str,
     stages: list[StageRun],
     run_dir: Path,
+    next_note_phase: str | None,
 ) -> None:
     if not checkpoint_state.enabled:
         return
@@ -1374,13 +1486,21 @@ def run_supervisor_checkpoint(
         "run_dir": str(run_dir),
         "stage_count": len(stages),
         "stages": [checkpoint_stage_record(stage) for stage in stages],
+        "active_notes": [supervisor_note_record(note) for note in checkpoint_state.notes],
         "commands": [],
     }
     log_progress(f"Checkpoint {checkpoint_id} reached: {description}")
     log_checkpoint(f"{checkpoint_id}: {description}")
-    log_checkpoint("Actions: Enter/continue, i/inspect, a/abort")
+    if next_note_phase is None:
+        log_checkpoint("Actions: Enter/continue, i/inspect, a/abort")
+    else:
+        log_checkpoint("Actions: Enter/continue, i/inspect, n/note, a/abort")
     while True:
-        command = read_supervisor_command(f"[{checkpoint_id}] action [Enter=continue, i=inspect, a=abort]: ")
+        if next_note_phase is None:
+            prompt = f"[{checkpoint_id}] action [Enter=continue, i=inspect, a=abort]: "
+        else:
+            prompt = f"[{checkpoint_id}] action [Enter=continue, i=inspect, n=note, a=abort]: "
+        command = read_supervisor_command(prompt)
         normalized = command.lower()
         command_event = {
             "timestamp": utc_timestamp_precise(),
@@ -1394,8 +1514,52 @@ def run_supervisor_checkpoint(
         if normalized in ("i", "inspect"):
             command_event["normalized"] = "inspect"
             event["commands"].append(command_event)
-            for line in format_checkpoint_inspection(checkpoint_id, description, run_dir, stages):
+            for line in format_checkpoint_inspection(
+                checkpoint_id,
+                description,
+                run_dir,
+                stages,
+                checkpoint_state.notes,
+                checkpoint_state.notes_history_path,
+            ):
                 log_checkpoint(line)
+            continue
+        if normalized in ("n", "note"):
+            command_event["normalized"] = "note"
+            if next_note_phase is None:
+                command_event["result"] = "unavailable"
+                event["commands"].append(command_event)
+                log_checkpoint(f"{checkpoint_id}: no later agent stage remains, so this checkpoint cannot add a supervisor note.")
+                continue
+            note_text = read_supervisor_note(checkpoint_id)
+            if note_text is None:
+                command_event["result"] = "cancelled"
+                event["commands"].append(command_event)
+                continue
+            note_id = f"note-{checkpoint_state.next_note_index:02d}"
+            checkpoint_state.next_note_index += 1
+            note_record_file = checkpoint_state.notes_history_path.parent / f"{note_id}.json"
+            note = {
+                "id": note_id,
+                "created_at": utc_timestamp_precise(),
+                "checkpoint_id": checkpoint_id,
+                "checkpoint_name": name,
+                "applies_from_phase": next_note_phase,
+                "status": "active",
+                "text": note_text,
+                "summary": note_summary({"text": note_text}),
+                "record_file": str(note_record_file),
+            }
+            write_json(note_record_file, note)
+            append_jsonl(checkpoint_state.notes_history_path, note)
+            checkpoint_state.notes.append(note)
+            event.setdefault("notes_added", []).append(supervisor_note_record(note))
+            command_event["result"] = "added"
+            command_event["note_id"] = note_id
+            event["commands"].append(command_event)
+            log_checkpoint(
+                f"{checkpoint_id}: added {note_id}; applies from {next_note_phase}; summary=\"{note_summary(note)}\""
+            )
             continue
         if normalized in ("a", "abort"):
             command_event["normalized"] = "abort"
@@ -1405,11 +1569,17 @@ def run_supervisor_checkpoint(
         if normalized in ("h", "help", "?"):
             command_event["normalized"] = "help"
             event["commands"].append(command_event)
-            log_checkpoint("Available commands: Enter/continue, i/inspect, a/abort")
+            if next_note_phase is None:
+                log_checkpoint("Available commands: Enter/continue, i/inspect, a/abort")
+            else:
+                log_checkpoint("Available commands: Enter/continue, i/inspect, n/note, a/abort")
             continue
         command_event["normalized"] = "invalid"
         event["commands"].append(command_event)
-        log_checkpoint("Unknown command. Use Enter/continue, i/inspect, or a/abort.")
+        if next_note_phase is None:
+            log_checkpoint("Unknown command. Use Enter/continue, i/inspect, or a/abort.")
+        else:
+            log_checkpoint("Unknown command. Use Enter/continue, i/inspect, n/note, or a/abort.")
     event["resolved_at"] = utc_timestamp_precise()
     event["record_file"] = str(checkpoint_state.history_path.parent / f"{checkpoint_id}.json")
     write_json(Path(event["record_file"]), event)
@@ -1818,6 +1988,7 @@ def apply_final_to_source(repo: Path, workspace: Path, changed_files: list[str])
 def markdown_report(data: dict[str, Any]) -> str:
     status = str(data.get("status", "completed"))
     checkpoint_events = data.get("checkpoint_events", [])
+    supervisor_notes = data.get("supervisor_notes", [])
     if status == "failed":
         lines = [
             f"# Peer Consensus Run {data['run_id']}",
@@ -1839,6 +2010,8 @@ def markdown_report(data: dict[str, Any]) -> str:
             f"- Supervisor log: `{data.get('supervisor_log', '')}`",
             f"- Checkpoint history: `{data.get('checkpoint_history', '')}`",
             f"- Checkpoint events: `{len(checkpoint_events)}`",
+            f"- Notes history: `{data.get('notes_history', '')}`",
+            f"- Supervisor notes: `{len(supervisor_notes)}`",
             f"- Report file: `{Path(data['run_dir']) / 'report.json'}`",
             f"- Traceback file: `{data.get('traceback_file', '')}`",
         ]
@@ -1868,6 +2041,8 @@ def markdown_report(data: dict[str, Any]) -> str:
             f"- Supervisor log: `{data.get('supervisor_log', '')}`",
             f"- Checkpoint history: `{data.get('checkpoint_history', '')}`",
             f"- Checkpoint events: `{len(checkpoint_events)}`",
+            f"- Notes history: `{data.get('notes_history', '')}`",
+            f"- Supervisor notes: `{len(supervisor_notes)}`",
             f"- Report file: `{Path(data['run_dir']) / 'report.json'}`",
         ]
         return "\n".join(lines) + "\n"
@@ -1893,6 +2068,14 @@ def markdown_report(data: dict[str, Any]) -> str:
         lines.extend(f"- `{item}`" for item in final_files)
     else:
         lines.append("- None")
+    lines.extend(["", "## Supervisor Notes"])
+    if supervisor_notes:
+        lines.extend(
+            f"- `{note.get('id', '')}` from `{note.get('checkpoint_id', '')}` applies from `{note.get('applies_from_phase', '')}`: {note_summary(note)}"
+            for note in supervisor_notes
+        )
+    else:
+        lines.append("- None")
     lines.extend(
         [
             "",
@@ -1906,6 +2089,8 @@ def markdown_report(data: dict[str, Any]) -> str:
             f"- Supervisor log: `{data.get('supervisor_log', '')}`",
             f"- Checkpoint history: `{data.get('checkpoint_history', '')}`",
             f"- Checkpoint events: `{len(checkpoint_events)}`",
+            f"- Notes history: `{data.get('notes_history', '')}`",
+            f"- Supervisor notes: `{len(supervisor_notes)}`",
             f"- Final plan file: `{data['final_plan_file']}`",
             f"- Final package: `{data['final_package']}`",
         ]
@@ -1930,7 +2115,11 @@ def main() -> int:
     checkpoint_state = CheckpointState(
         enabled=args.supervise_checkpoints,
         history_path=run_dir / "checkpoints" / "history.jsonl",
+        notes_history_path=run_dir / "notes" / "history.jsonl",
     )
+    if checkpoint_state.enabled:
+        write_text(checkpoint_state.history_path, "")
+        write_text(checkpoint_state.notes_history_path, "")
     initialize_run_state(progress_log_path, supervisor_log_path)
     log_progress(
         f"Run {run_id} started for {repo}; artifacts: {run_dir}; agent-timeout={format_timeout(agent_timeout)}"
@@ -1968,6 +2157,9 @@ def main() -> int:
     def checkpoint_history_value() -> str:
         return str(checkpoint_state.history_path) if checkpoint_state.enabled else ""
 
+    def notes_history_value() -> str:
+        return str(checkpoint_state.notes_history_path) if checkpoint_state.enabled else ""
+
     try:
         workspaces = prepare_workspaces(repo, run_dir, args.include_path)
         log_progress("Prepared isolated workspaces.")
@@ -1981,7 +2173,7 @@ def main() -> int:
             "supervise": supervise_enabled,
         }
 
-        def maybe_checkpoint(name: str, description: str, *stages: StageRun) -> None:
+        def maybe_checkpoint(name: str, description: str, *stages: StageRun, next_note_phase: str | None) -> None:
             nonlocal current_phase
             if not checkpoint_state.enabled:
                 return
@@ -1994,6 +2186,7 @@ def main() -> int:
                     description=description,
                     stages=list(stages),
                     run_dir=run_dir,
+                    next_note_phase=next_note_phase,
                 )
             except Exception:
                 raise
@@ -2010,7 +2203,7 @@ def main() -> int:
                 "phase": "plan-initial",
                 "workspace": workspaces.claude,
                 "shared_dirs": [run_dir],
-                "prompt": build_plan_prompt("Claude Code", task, args.acceptance, args.scope),
+                "prompt": build_plan_prompt("Claude Code", task, args.acceptance, args.scope, checkpoint_state.notes),
                 "schema": PLAN_SCHEMA,
                 "stage_dir": run_dir / "stages" / "plan-initial" / "claude",
                 "read_only": True,
@@ -2021,13 +2214,19 @@ def main() -> int:
                 "phase": "plan-initial",
                 "workspace": workspaces.codex,
                 "shared_dirs": [run_dir],
-                "prompt": build_plan_prompt("Codex", task, args.acceptance, args.scope),
+                "prompt": build_plan_prompt("Codex", task, args.acceptance, args.scope, checkpoint_state.notes),
                 "schema": PLAN_SCHEMA,
                 "stage_dir": run_dir / "stages" / "plan-initial" / "codex",
                 "read_only": True,
             },
         )
-        maybe_checkpoint("plan-initial", "Initial plan drafts completed.", initial_claude, initial_codex)
+        maybe_checkpoint(
+            "plan-initial",
+            "Initial plan drafts completed.",
+            initial_claude,
+            initial_codex,
+            next_note_phase="plan-review",
+        )
 
         current_phase = "plan-review"
         review_claude, review_codex = run_parallel_stage_pair(
@@ -2044,6 +2243,7 @@ def main() -> int:
                     args.acceptance,
                     args.scope,
                     initial_codex.parsed,
+                    checkpoint_state.notes,
                 ),
                 "schema": REVIEW_SCHEMA,
                 "stage_dir": run_dir / "stages" / "plan-review" / "claude-on-codex",
@@ -2062,13 +2262,20 @@ def main() -> int:
                     args.acceptance,
                     args.scope,
                     initial_claude.parsed,
+                    checkpoint_state.notes,
                 ),
                 "schema": REVIEW_SCHEMA,
                 "stage_dir": run_dir / "stages" / "plan-review" / "codex-on-claude",
                 "read_only": True,
             },
         )
-        maybe_checkpoint("plan-review", "Cross-review of the initial plans completed.", review_claude, review_codex)
+        maybe_checkpoint(
+            "plan-review",
+            "Cross-review of the initial plans completed.",
+            review_claude,
+            review_codex,
+            next_note_phase="plan-revise",
+        )
 
         current_phase = "plan-revise"
         revised_claude, revised_codex = run_parallel_stage_pair(
@@ -2085,6 +2292,7 @@ def main() -> int:
                     args.acceptance,
                     args.scope,
                     review_codex.parsed,
+                    checkpoint_state.notes,
                 ),
                 "schema": PLAN_REVISION_SCHEMA,
                 "stage_dir": run_dir / "stages" / "plan-revision" / "claude",
@@ -2103,13 +2311,20 @@ def main() -> int:
                     args.acceptance,
                     args.scope,
                     review_claude.parsed,
+                    checkpoint_state.notes,
                 ),
                 "schema": PLAN_REVISION_SCHEMA,
                 "stage_dir": run_dir / "stages" / "plan-revision" / "codex",
                 "read_only": True,
             },
         )
-        maybe_checkpoint("plan-revise", "Each side revised its plan after peer review.", revised_claude, revised_codex)
+        maybe_checkpoint(
+            "plan-revise",
+            "Each side revised its plan after peer review.",
+            revised_claude,
+            revised_codex,
+            next_note_phase="plan-consensus",
+        )
 
         current_phase = "plan-consensus-evaluate"
         consensus_claude, consensus_codex = run_parallel_stage_pair(
@@ -2127,6 +2342,7 @@ def main() -> int:
                     args.scope,
                     revised_claude.parsed,
                     revised_codex.parsed,
+                    checkpoint_state.notes,
                 ),
                 "schema": CONSENSUS_SCHEMA,
                 "stage_dir": run_dir / "stages" / "plan-consensus" / "claude",
@@ -2146,6 +2362,7 @@ def main() -> int:
                     args.scope,
                     revised_codex.parsed,
                     revised_claude.parsed,
+                    checkpoint_state.notes,
                 ),
                 "schema": CONSENSUS_SCHEMA,
                 "stage_dir": run_dir / "stages" / "plan-consensus" / "codex",
@@ -2157,6 +2374,7 @@ def main() -> int:
             "Consensus evaluation completed and the final plan base is ready to choose.",
             consensus_claude,
             consensus_codex,
+            next_note_phase="plan-finalize",
         )
 
         final_plan_base = choose_final_base(consensus_claude.parsed, consensus_codex.parsed)
@@ -2198,13 +2416,19 @@ def main() -> int:
                 merge_brief,
                 base_revision.parsed,
                 peer_revision.parsed,
+                checkpoint_state.notes,
             ),
             schema=FINAL_PLAN_SCHEMA,
             stage_dir=run_dir / "stages" / "plan-final" / final_plan_base,
             read_only=True,
         )
         write_json(final_plan_file, final_plan.parsed)
-        maybe_checkpoint("plan-finalize", "Final execution plan is ready.", final_plan)
+        maybe_checkpoint(
+            "plan-finalize",
+            "Final execution plan is ready.",
+            final_plan,
+            next_note_phase="execute-initial",
+        )
 
         current_phase = "execution"
         log_progress("Phase 2/3: Execution")
@@ -2221,12 +2445,18 @@ def main() -> int:
                 args.acceptance,
                 args.scope,
                 final_plan.parsed,
+                checkpoint_state.notes,
             ),
             schema=EXECUTION_SCHEMA,
             stage_dir=run_dir / "stages" / "execute" / final_plan_base / "round-0",
             read_only=False,
         )
-        maybe_checkpoint("execute-initial", "Initial implementation completed.", current_execution)
+        maybe_checkpoint(
+            "execute-initial",
+            "Initial implementation completed.",
+            current_execution,
+            next_note_phase="implementation-review-0",
+        )
 
         current_phase = "implementation-review"
         log_progress("Phase 3/3: Implementation review")
@@ -2243,19 +2473,24 @@ def main() -> int:
                     executor_name,
                     task,
                     args.acceptance,
-                    args.scope,
-                    final_plan.parsed,
-                    current_execution.parsed,
-                    current_execution.package_dir,
-                ),
+                        args.scope,
+                        final_plan.parsed,
+                        current_execution.parsed,
+                        current_execution.package_dir,
+                        checkpoint_state.notes,
+                    ),
                 schema=REVIEW_SCHEMA,
                 stage_dir=run_dir / "stages" / "implementation-review" / f"round-{round_idx}" / reviewer_name.lower().replace(" ", "-"),
                 read_only=True,
             )
+            review_next_note_phase = None
+            if implementation_review.parsed.get("overall_verdict") != "approve" and round_idx < args.review_rounds:
+                review_next_note_phase = f"execute-fix-{round_idx + 1}"
             maybe_checkpoint(
                 f"implementation-review-{round_idx}",
                 f"Implementation review round {round_idx} completed.",
                 implementation_review,
+                next_note_phase=review_next_note_phase,
             )
 
             if implementation_review.parsed.get("overall_verdict") == "approve":
@@ -2282,10 +2517,11 @@ def main() -> int:
                     executor_name,
                     task,
                     args.acceptance,
-                    args.scope,
-                    final_plan.parsed,
-                    implementation_review.parsed,
-                ),
+                        args.scope,
+                        final_plan.parsed,
+                        implementation_review.parsed,
+                        checkpoint_state.notes,
+                    ),
                 schema=EXECUTION_SCHEMA,
                 stage_dir=run_dir / "stages" / "execute-fix" / final_plan_base / f"round-{round_idx + 1}",
                 read_only=False,
@@ -2294,6 +2530,7 @@ def main() -> int:
                 f"execute-fix-{round_idx + 1}",
                 f"Execution fix round {round_idx + 1} completed.",
                 current_execution,
+                next_note_phase=f"implementation-review-{round_idx + 1}",
             )
 
         if args.apply_final and final_approved and current_execution is not None:
@@ -2302,6 +2539,7 @@ def main() -> int:
                 "apply-final",
                 "Final result is approved and ready to copy back into the source workspace.",
                 *checkpoint_stages,
+                next_note_phase=None,
             )
             current_phase = "apply-final"
             apply_final_to_source(repo, current_execution.workspace, current_execution.changed_files)
@@ -2320,6 +2558,9 @@ def main() -> int:
             "supervisor_log": str(supervisor_log_path) if supervisor_log_path else "",
             "checkpoint_history": checkpoint_history_value(),
             "checkpoint_events": checkpoint_state.events,
+            "notes_history": notes_history_value(),
+            "supervisor_notes_count": len(checkpoint_state.notes),
+            "supervisor_notes": checkpoint_state.notes,
             "stage_timings": snapshot_stage_timings(),
             "final_plan_base": final_plan_base,
             "executor": final_plan_base,
@@ -2349,6 +2590,9 @@ def main() -> int:
             "supervisor_log": str(supervisor_log_path) if supervisor_log_path else "",
             "checkpoint_history": checkpoint_history_value(),
             "checkpoint_events": checkpoint_state.events,
+            "notes_history": notes_history_value(),
+            "supervisor_notes_count": len(checkpoint_state.notes),
+            "supervisor_notes": checkpoint_state.notes,
             "stage_timings": snapshot_stage_timings(),
             "final_plan_base": final_plan_base,
             "executor": final_plan_base,
@@ -2383,6 +2627,9 @@ def main() -> int:
             "supervisor_log": str(supervisor_log_path) if supervisor_log_path else "",
             "checkpoint_history": checkpoint_history_value(),
             "checkpoint_events": checkpoint_state.events,
+            "notes_history": notes_history_value(),
+            "supervisor_notes_count": len(checkpoint_state.notes),
+            "supervisor_notes": checkpoint_state.notes,
             "stage_timings": snapshot_stage_timings(),
             "failed_phase": current_phase,
             "error_type": type(exc).__name__,
