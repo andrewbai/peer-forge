@@ -213,6 +213,11 @@ def parse_apply_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help="Allow apply even if the target repository HEAD has moved since the live run started.",
     )
+    parser.add_argument(
+        "--allow-dirty-target",
+        action="store_true",
+        help="Allow apply when the target repository has unrelated dirty paths that do not overlap the execution package.",
+    )
     args = parser.parse_args(argv)
     if args.commit and not args.apply:
         parser.error("--commit requires --apply.")
@@ -1440,6 +1445,26 @@ def git_status_porcelain(repo: Path, paths: list[str] | None = None) -> list[str
     return [line for line in proc.stdout.splitlines() if line.strip()]
 
 
+def git_dirty_paths(repo: Path) -> list[str]:
+    tracked = git(repo, "diff", "--name-only", "--find-renames", "HEAD").stdout.splitlines()
+    untracked = git(repo, "ls-files", "--others", "--exclude-standard").stdout.splitlines()
+    return unique_lines([normalized_rel_path(path) for path in tracked + untracked if path.strip()])
+
+
+def git_changed_paths_between(repo: Path, start_ref: str, end_ref: str) -> list[str]:
+    if not start_ref or not end_ref or start_ref == end_ref:
+        return []
+    proc = git(repo, "diff", "--name-only", "--find-renames", f"{start_ref}..{end_ref}", check=False)
+    if proc.returncode != 0:
+        raise RuntimeError(f"Unable to diff repository paths between {start_ref} and {end_ref}: {proc.stderr or proc.stdout}")
+    return unique_lines([normalized_rel_path(path) for path in proc.stdout.splitlines() if path.strip()])
+
+
+def overlap_paths(left: list[str], right: list[str]) -> list[str]:
+    right_set = set(right)
+    return [path for path in left if path in right_set]
+
+
 def package_files_root(package: dict[str, Any]) -> Path:
     return Path(package["package_dir"]) / "files"
 
@@ -1480,6 +1505,7 @@ def apply_attempt_markdown(data: dict[str, Any]) -> str:
         "",
         f"- Run: `{data['run_id']}`",
         f"- Status: `{data['status']}`",
+        f"- Decision: `{data.get('decision', '')}`",
         f"- Apply requested: `{data['apply_requested']}`",
         f"- Commit requested: `{data['commit_requested']}`",
         f"- Repo: `{data['repo']}`",
@@ -1495,12 +1521,34 @@ def apply_attempt_markdown(data: dict[str, Any]) -> str:
         f"- Changed files: `{len(data.get('changed_files', []))}`",
         f"- Copied files: `{len(data.get('copied_files', []))}`",
         f"- Deleted files: `{len(data.get('deleted_files', []))}`",
+        f"- Safe paths: `{len(data.get('safe_paths', []))}`",
+        f"- Blocked paths: `{len(data.get('blocked_paths', []))}`",
+        "",
+        "## Path Analysis",
+        f"- Dirty paths: `{len(data.get('dirty_paths', []))}`",
+        f"- Drift paths: `{len(data.get('drift_paths', []))}`",
+        f"- Dirty overlap: `{len(data.get('dirty_overlap', []))}`",
+        f"- Drift overlap: `{len(data.get('drift_overlap', []))}`",
+        f"- Requires --allow-dirty-target: `{data.get('requires_allow_dirty_target', False)}`",
+        f"- Requires --allow-base-drift: `{data.get('requires_allow_base_drift', False)}`",
         "",
         "## Blockers",
     ]
     blockers = data.get("blockers", [])
     if blockers:
         lines.extend(f"- {item}" for item in blockers)
+    else:
+        lines.append("- None")
+    lines.extend(["", "## Safe Paths"])
+    safe_paths = data.get("safe_paths", [])
+    if safe_paths:
+        lines.extend(f"- {item}" for item in safe_paths)
+    else:
+        lines.append("- None")
+    lines.extend(["", "## Blocked Paths"])
+    blocked_paths = data.get("blocked_paths", [])
+    if blocked_paths:
+        lines.extend(f"- {item}" for item in blocked_paths)
     else:
         lines.append("- None")
     lines.extend(["", "## Warnings"])
@@ -2351,6 +2399,17 @@ def apply_mode(args: argparse.Namespace) -> int:
     branch_mode = "new"
     target_branch = target_branch_arg or default_apply_branch(state)
     report: dict[str, Any] = {}
+    manifest: dict[str, Any] = {"changed_files": [], "copied_files": [], "deleted_files": []}
+    package_paths: list[str] = []
+    dirty_paths: list[str] = []
+    drift_paths: list[str] = []
+    dirty_overlap: list[str] = []
+    drift_overlap: list[str] = []
+    safe_paths: list[str] = []
+    blocked_paths: list[str] = []
+    requires_allow_dirty_target = False
+    requires_allow_base_drift = False
+    decision = "blocked"
 
     try:
         if not repo.exists():
@@ -2366,9 +2425,9 @@ def apply_mode(args: argparse.Namespace) -> int:
         if package is None:
             blockers.append("No execution package is available in state.json.")
 
-        manifest: dict[str, Any] = {"changed_files": [], "copied_files": [], "deleted_files": []}
         if package is not None:
             manifest = load_execution_manifest(package)
+            package_paths = list(manifest["changed_files"])
             actions.append(f"materialize {len(manifest['copied_files'])} copied files from package")
             if manifest["deleted_files"]:
                 actions.append(f"delete {len(manifest['deleted_files'])} files from package manifest")
@@ -2385,18 +2444,52 @@ def apply_mode(args: argparse.Namespace) -> int:
                     blockers.append(f"State repo path does not match git toplevel: state={repo} git={resolved_top}")
                 current_head = git(repo, "rev-parse", "HEAD").stdout.strip()
                 original_branch = current_branch_name(repo)
-                dirty = git_status_porcelain(repo)
-                if dirty:
-                    blockers.append("Target repository has uncommitted changes; live apply requires a clean worktree.")
+                dirty_paths = git_dirty_paths(repo)
                 if expected_head and current_head != expected_head:
-                    if args.allow_base_drift:
-                        warnings.append(
-                            f"Target HEAD drift accepted by flag: expected {expected_head}, current {current_head}."
-                        )
-                    else:
-                        blockers.append(
-                            f"Target HEAD drift detected: expected {expected_head}, current {current_head}. Use --allow-base-drift to override."
-                        )
+                    drift_paths = git_changed_paths_between(repo, expected_head, current_head)
+
+        if package_paths:
+            dirty_overlap = overlap_paths(package_paths, dirty_paths)
+            drift_overlap = overlap_paths(package_paths, drift_paths)
+            blocked_paths = unique_lines(dirty_overlap + drift_overlap)
+            blocked_set = set(blocked_paths)
+            safe_paths = [path for path in package_paths if path not in blocked_set]
+        else:
+            safe_paths = []
+
+        requires_allow_dirty_target = bool(dirty_paths) and not dirty_overlap
+        requires_allow_base_drift = bool(drift_overlap)
+
+        if dirty_overlap:
+            blockers.append(
+                "Target repository has dirty paths that overlap the execution package: "
+                + ", ".join(dirty_overlap)
+            )
+        elif dirty_paths:
+            if args.allow_dirty_target:
+                warnings.append(
+                    "Target repository has unrelated dirty paths; proceeding because --allow-dirty-target was set."
+                )
+            else:
+                blockers.append(
+                    "Target repository has unrelated dirty paths. Re-run with --allow-dirty-target to proceed: "
+                    + ", ".join(dirty_paths)
+                )
+
+        if drift_overlap:
+            if args.allow_base_drift:
+                warnings.append(
+                    "Target HEAD drift overlaps execution-package paths; proceeding because --allow-base-drift was set."
+                )
+            else:
+                blockers.append(
+                    "Target HEAD drift overlaps the execution package. Re-run with --allow-base-drift to override: "
+                    + ", ".join(drift_overlap)
+                )
+        elif drift_paths:
+            warnings.append(
+                "Target HEAD drift was detected, but it does not overlap the execution package paths."
+            )
 
         if target_branch == "current":
             branch_mode = "current"
@@ -2412,6 +2505,22 @@ def apply_mode(args: argparse.Namespace) -> int:
         if args.commit:
             actions.append("create a git commit after apply")
 
+        if blockers:
+            if dirty_overlap and drift_overlap:
+                decision = "preview-blocked-mixed-overlap"
+            elif dirty_overlap:
+                decision = "preview-blocked-dirty-overlap"
+            elif drift_overlap:
+                decision = "preview-blocked-drift-overlap"
+            elif dirty_paths and not args.allow_dirty_target:
+                decision = "preview-needs-allow-dirty-target"
+            else:
+                decision = "preview-blocked"
+        elif not args.apply:
+            decision = "preview-safe"
+        else:
+            decision = "apply-safe"
+
         report = {
             "attempt_id": attempt_id,
             "created_at": utc_timestamp_precise(),
@@ -2419,8 +2528,11 @@ def apply_mode(args: argparse.Namespace) -> int:
             "state_file": str(state_file),
             "repo": str(repo),
             "status": "blocked" if blockers else ("preview" if not args.apply else "ready"),
+            "decision": decision,
             "apply_requested": bool(args.apply),
             "commit_requested": bool(args.commit),
+            "allow_dirty_target": bool(args.allow_dirty_target),
+            "allow_base_drift": bool(args.allow_base_drift),
             "target_branch": target_branch,
             "branch_mode": branch_mode,
             "original_branch": original_branch,
@@ -2432,6 +2544,15 @@ def apply_mode(args: argparse.Namespace) -> int:
             "changed_files": list(manifest.get("changed_files", [])),
             "copied_files": list(manifest.get("copied_files", [])),
             "deleted_files": list(manifest.get("deleted_files", [])),
+            "package_paths": list(package_paths),
+            "dirty_paths": list(dirty_paths),
+            "drift_paths": list(drift_paths),
+            "dirty_overlap": list(dirty_overlap),
+            "drift_overlap": list(drift_overlap),
+            "safe_paths": list(safe_paths),
+            "blocked_paths": list(blocked_paths),
+            "requires_allow_dirty_target": requires_allow_dirty_target,
+            "requires_allow_base_drift": requires_allow_base_drift,
             "blockers": blockers,
             "warnings": warnings,
             "actions": actions,
@@ -2451,6 +2572,7 @@ def apply_mode(args: argparse.Namespace) -> int:
         path_changes = git_status_porcelain(repo, manifest["changed_files"])
         if not path_changes:
             report["status"] = "noop"
+            report["decision"] = "apply-noop"
             warnings.append("Applying the execution package produced no repository changes.")
         elif args.commit:
             git(repo, "add", "-A", "--", *manifest["changed_files"])
@@ -2464,8 +2586,10 @@ def apply_mode(args: argparse.Namespace) -> int:
             git(repo, "commit", "-m", commit_message, "-m", commit_body)
             commit_sha = git(repo, "rev-parse", "HEAD").stdout.strip()
             report["status"] = "committed"
+            report["decision"] = "committed"
         else:
             report["status"] = "applied"
+            report["decision"] = "applied"
 
         report["branch_created"] = branch_created
         report["commit_sha"] = commit_sha
@@ -2481,8 +2605,11 @@ def apply_mode(args: argparse.Namespace) -> int:
                 "state_file": str(state_file),
                 "repo": str(repo),
                 "status": "failed",
+                "decision": "failed",
                 "apply_requested": bool(args.apply),
                 "commit_requested": bool(args.commit),
+                "allow_dirty_target": bool(args.allow_dirty_target),
+                "allow_base_drift": bool(args.allow_base_drift),
                 "target_branch": target_branch,
                 "branch_mode": branch_mode,
                 "original_branch": original_branch,
@@ -2491,9 +2618,18 @@ def apply_mode(args: argparse.Namespace) -> int:
                 "package_dir": str(package.get("package_dir", "")) if package else "",
                 "manifest_path": str(package_manifest_path(package)) if package else "",
                 "diff_path": str(package_diff_path(package)) if package else "",
-                "changed_files": [],
-                "copied_files": [],
-                "deleted_files": [],
+                "changed_files": list(manifest.get("changed_files", [])),
+                "copied_files": list(manifest.get("copied_files", [])),
+                "deleted_files": list(manifest.get("deleted_files", [])),
+                "package_paths": list(package_paths),
+                "dirty_paths": list(dirty_paths),
+                "drift_paths": list(drift_paths),
+                "dirty_overlap": list(dirty_overlap),
+                "drift_overlap": list(drift_overlap),
+                "safe_paths": list(safe_paths),
+                "blocked_paths": list(blocked_paths),
+                "requires_allow_dirty_target": requires_allow_dirty_target,
+                "requires_allow_base_drift": requires_allow_base_drift,
                 "blockers": [],
                 "warnings": [],
                 "actions": actions,

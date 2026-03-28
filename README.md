@@ -160,6 +160,15 @@ Actually apply and commit onto a new branch:
   --commit
 ```
 
+Apply even when the target repo has unrelated dirty paths:
+
+```bash
+~/.claude/skills/peer-forge/bin/peer-forge-live apply \
+  --state-file /path/to/state.json \
+  --apply \
+  --allow-dirty-target
+```
+
 ## Requirements
 
 - `claude` CLI installed and logged in
@@ -271,8 +280,11 @@ Apply semantics:
 - Real writes require `--apply`.
 - The default landing branch is `peer-forge/<run-id>`.
 - `--commit` creates a git commit after applying the package.
-- Live apply currently supports only git-backed live runs with a clean target worktree.
-- By default, apply refuses to run if the target repo HEAD has drifted since the live run started.
+- Live apply currently supports only git-backed live runs.
+- If the target repo HEAD has drifted but the changed paths do not overlap the execution package, preview/apply is allowed automatically.
+- If the target repo has unrelated dirty paths, you must pass `--allow-dirty-target`.
+- If dirty paths or drifted paths overlap the execution package, apply stays blocked by default.
+- `--allow-base-drift` is the explicit override when drift overlaps the execution package.
 
 Each live run writes artifacts under:
 

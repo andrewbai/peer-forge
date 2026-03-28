@@ -163,6 +163,15 @@ live tmux 模式：
   --commit
 ```
 
+如果目标仓库只有不相关的脏文件，也可以显式允许 apply：
+
+```bash
+~/.claude/skills/peer-forge/bin/peer-forge-live apply \
+  --state-file /path/to/state.json \
+  --apply \
+  --allow-dirty-target
+```
+
 ## 环境要求
 
 - 已安装并登录 `claude` CLI
@@ -277,8 +286,11 @@ apply 语义：
 - 真正写入必须显式传 `--apply`。
 - 默认会落到 `peer-forge/<run-id>` 新分支。
 - `--commit` 会在 apply 完成后自动创建 git commit。
-- 当前 live apply 只支持 git-backed 的 live run，而且目标仓库必须是 clean worktree。
-- 默认如果目标仓库的 HEAD 相比 live run 启动时已经漂移，会直接拒绝 apply。
+- 当前 live apply 只支持 git-backed 的 live run。
+- 如果目标仓库的 HEAD 已漂移，但漂移路径和 execution package 不重叠，会自动允许 preview/apply。
+- 如果目标仓库有不相关的脏文件，必须显式传 `--allow-dirty-target`。
+- 如果脏文件路径或漂移路径和 execution package 重叠，默认仍然拒绝 apply。
+- `--allow-base-drift` 是“漂移路径和 package 重叠时”的显式 override。
 
 每次 live run 的产物会写到：
 

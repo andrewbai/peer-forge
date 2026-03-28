@@ -2,7 +2,14 @@
 
 ## Unreleased
 
-Nothing yet.
+Conflict-aware live apply.
+
+- Changed `peer-forge-live apply` from whole-repo dirty/drift blocking to path-level overlap analysis.
+- Allowed non-overlap base drift automatically while continuing to block overlapping drift unless `--allow-base-drift` is set.
+- Added `--allow-dirty-target` for unrelated dirty worktree paths while keeping overlapping dirty paths blocked.
+- Expanded apply reports with dirty/drift path sets, overlap summaries, safe paths, blocked paths, and decision metadata.
+- Extended `scripts/live-apply-smoke.sh` to cover safe apply, non-overlap drift, non-overlap dirty targets, and overlap blocking.
+- Updated the English README, Chinese README, and `peer-forge-live` skill docs for the new conflict-aware apply rules.
 
 ## v0.13.1 - 2026-03-29
 

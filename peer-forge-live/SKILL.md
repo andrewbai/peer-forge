@@ -124,6 +124,15 @@ If the user wants to stay on the current branch instead of creating the default 
   --branch current
 ```
 
+If the target repo has unrelated dirty paths and the user still wants to land the package:
+
+```bash
+~/.claude/skills/peer-forge/bin/peer-forge-live apply \
+  --state-file /path/to/state.json \
+  --apply \
+  --allow-dirty-target
+```
+
 Important startup behavior:
 
 - Do not promise a fully unattended start.
@@ -160,9 +169,11 @@ Live apply rules:
 - Actual repo writes require `--apply`.
 - The default landing branch is `peer-forge/<run-id>`.
 - Apply is allowed only after approved plan and approved execution.
-- Apply currently requires a clean git-backed target repo.
-- If the repo HEAD has drifted since the live run started, apply is blocked by default.
-- `--allow-base-drift` is the explicit override for that baseline drift check.
+- Apply currently requires a git-backed target repo.
+- Non-overlap base drift is allowed automatically.
+- Unrelated dirty target paths require `--allow-dirty-target`.
+- Overlap between target drift/dirty paths and package paths stays blocked by default.
+- `--allow-base-drift` is the explicit override when drift overlaps package paths.
 
 ## When To Prefer `peer-consensus`
 

@@ -186,31 +186,113 @@ subject = subprocess.run(["git", "-C", str(repo), "log", "-1", "--pretty=%s"], c
 assert subject.startswith("Apply peer-forge-live run "), subject
 PY
 
-echo "[live-apply-smoke] creating drift fixture"
-drift_fixture="$(create_fixture drift)"
-drift_repo="$(printf '%s\n' "$drift_fixture" | sed -n '1p')"
-drift_state="$(printf '%s\n' "$drift_fixture" | sed -n '2p')"
-printf 'drift\n' >> "$drift_repo/src/legacy.txt"
-git -C "$drift_repo" add src/legacy.txt
-git -C "$drift_repo" commit -q -m "Introduce base drift"
+echo "[live-apply-smoke] creating drift-non-overlap fixture"
+drift_safe_fixture="$(create_fixture drift-safe)"
+drift_safe_repo="$(printf '%s\n' "$drift_safe_fixture" | sed -n '1p')"
+drift_safe_state="$(printf '%s\n' "$drift_safe_fixture" | sed -n '2p')"
+printf 'drift\n' >> "$drift_safe_repo/src/legacy.txt"
+git -C "$drift_safe_repo" add src/legacy.txt
+git -C "$drift_safe_repo" commit -q -m "Introduce non-overlap base drift"
 
-set +e
-drift_json="$("$repo_root/bin/peer-forge-live" apply --state-file "$drift_state")"
-drift_status=$?
-set -e
-if [[ "$drift_status" -eq 0 ]]; then
-  echo "[live-apply-smoke] expected drift preview to fail" >&2
-  exit 1
-fi
-
-DRIFT_JSON="$drift_json" python3 - <<'PY'
+drift_safe_json="$("$repo_root/bin/peer-forge-live" apply --state-file "$drift_safe_state")"
+DRIFT_SAFE_JSON="$drift_safe_json" python3 - <<'PY'
 import json
 import os
 
-payload = json.loads(os.environ["DRIFT_JSON"])
+payload = json.loads(os.environ["DRIFT_SAFE_JSON"])
+assert payload["status"] == "preview", payload
+assert payload["decision"] == "preview-safe", payload
+joined = "\n".join(payload.get("warnings", []))
+assert "does not overlap the execution package paths" in joined, joined
+assert payload["drift_paths"] == ["src/legacy.txt"], payload
+assert payload["drift_overlap"] == [], payload
+PY
+
+echo "[live-apply-smoke] creating dirty-non-overlap fixture"
+dirty_fixture="$(create_fixture dirty)"
+dirty_repo="$(printf '%s\n' "$dirty_fixture" | sed -n '1p')"
+dirty_state="$(printf '%s\n' "$dirty_fixture" | sed -n '2p')"
+printf 'dirty\n' >> "$dirty_repo/src/legacy.txt"
+
+set +e
+dirty_blocked_json="$("$repo_root/bin/peer-forge-live" apply --state-file "$dirty_state")"
+dirty_blocked_status=$?
+set -e
+if [[ "$dirty_blocked_status" -eq 0 ]]; then
+  echo "[live-apply-smoke] expected dirty preview without flag to fail" >&2
+  exit 1
+fi
+
+DIRTY_BLOCKED_JSON="$dirty_blocked_json" python3 - <<'PY'
+import json
+import os
+
+payload = json.loads(os.environ["DIRTY_BLOCKED_JSON"])
 assert payload["status"] == "blocked", payload
+assert payload["decision"] == "preview-needs-allow-dirty-target", payload
 joined = "\n".join(payload.get("blockers", []))
-assert "Target HEAD drift detected" in joined, joined
+assert "--allow-dirty-target" in joined, joined
+assert payload["dirty_paths"] == ["src/legacy.txt"], payload
+assert payload["dirty_overlap"] == [], payload
+PY
+
+dirty_allowed_json="$("$repo_root/bin/peer-forge-live" apply --state-file "$dirty_state" --apply --allow-dirty-target)"
+DIRTY_ALLOWED_JSON="$dirty_allowed_json" DIRTY_REPO="$dirty_repo" python3 - <<'PY'
+import json
+import os
+import subprocess
+from pathlib import Path
+
+payload = json.loads(os.environ["DIRTY_ALLOWED_JSON"])
+repo = Path(os.environ["DIRTY_REPO"])
+assert payload["status"] == "applied", payload
+assert payload["decision"] == "applied", payload
+assert (repo / "app.txt").read_text(encoding="utf-8") == "after\n"
+assert (repo / "new.txt").read_text(encoding="utf-8") == "brand new\n"
+assert not (repo / "remove.txt").exists()
+assert (repo / "src/legacy.txt").read_text(encoding="utf-8").endswith("dirty\n")
+branch = subprocess.run(["git", "-C", str(repo), "rev-parse", "--abbrev-ref", "HEAD"], check=True, text=True, capture_output=True).stdout.strip()
+assert branch == payload["target_branch"], (branch, payload)
+PY
+
+echo "[live-apply-smoke] creating overlap fixture"
+overlap_fixture="$(create_fixture overlap)"
+overlap_repo="$(printf '%s\n' "$overlap_fixture" | sed -n '1p')"
+overlap_state="$(printf '%s\n' "$overlap_fixture" | sed -n '2p')"
+printf 'overlap drift\n' >> "$overlap_repo/app.txt"
+git -C "$overlap_repo" add app.txt
+git -C "$overlap_repo" commit -q -m "Introduce overlap base drift"
+
+set +e
+overlap_blocked_json="$("$repo_root/bin/peer-forge-live" apply --state-file "$overlap_state")"
+overlap_blocked_status=$?
+set -e
+if [[ "$overlap_blocked_status" -eq 0 ]]; then
+  echo "[live-apply-smoke] expected overlap preview to fail" >&2
+  exit 1
+fi
+
+OVERLAP_BLOCKED_JSON="$overlap_blocked_json" python3 - <<'PY'
+import json
+import os
+
+payload = json.loads(os.environ["OVERLAP_BLOCKED_JSON"])
+assert payload["status"] == "blocked", payload
+assert payload["decision"] == "preview-blocked-drift-overlap", payload
+assert payload["drift_overlap"] == ["app.txt"], payload
+assert payload["blocked_paths"] == ["app.txt"], payload
+PY
+
+overlap_allowed_json="$("$repo_root/bin/peer-forge-live" apply --state-file "$overlap_state" --allow-base-drift)"
+OVERLAP_ALLOWED_JSON="$overlap_allowed_json" python3 - <<'PY'
+import json
+import os
+
+payload = json.loads(os.environ["OVERLAP_ALLOWED_JSON"])
+assert payload["status"] == "preview", payload
+assert payload["decision"] == "preview-safe", payload
+joined = "\n".join(payload.get("warnings", []))
+assert "--allow-base-drift" in joined, joined
 PY
 
 echo "[live-apply-smoke] live apply smoke test passed"
