@@ -15,7 +15,7 @@ import time
 import traceback
 import textwrap
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TextIO
@@ -212,6 +212,8 @@ class StageRun:
     agent: str
     phase: str
     workspace: Path
+    stage_dir: Path
+    read_only: bool
     prompt_path: Path
     stdout_path: Path
     stderr_path: Path
@@ -221,6 +223,22 @@ class StageRun:
     changed_files: list[str]
     diff_path: Path
     package_dir: Path
+    duration_seconds: float
+
+
+@dataclass
+class CheckpointState:
+    enabled: bool
+    history_path: Path
+    events: list[dict[str, Any]] = field(default_factory=list)
+    next_index: int = 1
+
+
+class RunAborted(RuntimeError):
+    def __init__(self, event: dict[str, Any]):
+        self.event = event
+        checkpoint_id = str(event.get("id", "unknown"))
+        super().__init__(f"Run aborted by supervisor at checkpoint {checkpoint_id}.")
 
 
 @dataclass
@@ -281,6 +299,19 @@ def log_supervisor(message: str, *, verbose_handle: TextIO | None = None) -> Non
         if verbose_handle is not None:
             verbose_handle.write(message + "\n")
             verbose_handle.flush()
+
+
+def log_checkpoint(message: str, *, include_progress: bool = False) -> None:
+    timestamp = datetime.now().astimezone().strftime("%H:%M:%S")
+    line = f"[checkpoint {timestamp}] {message}"
+    with PROGRESS_LOCK:
+        print(line, file=sys.stderr, flush=True)
+        if include_progress and PROGRESS_LOG_PATH is not None:
+            with PROGRESS_LOG_PATH.open("a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
+        if SUPERVISOR_LOG_PATH is not None:
+            with SUPERVISOR_LOG_PATH.open("a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
 
 
 def initialize_run_state(progress_log_path: Path, supervisor_log_path: Path | None) -> None:
@@ -540,6 +571,11 @@ def parse_args() -> argparse.Namespace:
         help="Stream Claude/Codex output to the terminal and write prefixed verbose logs without changing the protocol.",
     )
     parser.add_argument(
+        "--supervise-checkpoints",
+        action="store_true",
+        help="Pause at stage boundaries for supervisor commands (continue, inspect, abort). Implies --supervise.",
+    )
+    parser.add_argument(
         "--cleanup-workspaces",
         action="store_true",
         help="Remove the temporary isolated workspaces after the run completes.",
@@ -563,6 +599,10 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.agent_timeout_seconds < 0:
         parser.error("--agent-timeout-seconds must be >= 0.")
+    if args.supervise_checkpoints and not (args.task or args.task_file):
+        parser.error("--supervise-checkpoints requires --task or --task-file because stdin is reserved for checkpoint commands.")
+    if args.supervise_checkpoints and not sys.stdin.isatty():
+        parser.error("--supervise-checkpoints requires an interactive terminal.")
     if "--signoff-rounds" in sys.argv:
         print("Warning: --signoff-rounds is deprecated; use --review-rounds.", file=sys.stderr)
     if "--keep-run-dir" in sys.argv:
@@ -630,6 +670,12 @@ def write_text(path: Path, text: str) -> None:
 def write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+
+
+def append_jsonl(path: Path, data: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(data, ensure_ascii=True) + "\n")
 
 
 def read_json_loose(text: str) -> dict[str, Any]:
@@ -1180,6 +1226,201 @@ def build_execution_fix_prompt(
     ).strip()
 
 
+def checkpoint_stage_summary(stage: StageRun) -> str:
+    parsed = stage.parsed
+    if "overall_verdict" in parsed:
+        findings = parsed.get("findings", [])
+        return (
+            f"verdict={parsed.get('overall_verdict', '')} "
+            f"findings={len(findings)} must_fix={len(parsed.get('must_fix', []))}"
+        )
+    if "preferred_base" in parsed:
+        blockers = len(parsed.get("blocking_objections_to_self_final", [])) + len(
+            parsed.get("blocking_objections_to_peer_final", [])
+        )
+        return (
+            f"preferred_base={parsed.get('preferred_base', '')} "
+            f"approve_self={parsed.get('approve_self_as_final', False)} "
+            f"approve_peer={parsed.get('approve_peer_as_final', False)} "
+            f"blockers={blockers}"
+        )
+    if "changed_files" in parsed and "remaining_risks" in parsed:
+        return (
+            f"changed_files={len(parsed.get('changed_files', []))} "
+            f"tests={len(parsed.get('tests', []))} "
+            f"remaining_risks={len(parsed.get('remaining_risks', []))}"
+        )
+    if "steps" in parsed:
+        return (
+            f"summary=\"{clip_text(str(parsed.get('summary', '')))}\" "
+            f"steps={len(parsed.get('steps', []))} "
+            f"tests={len(parsed.get('tests', []))}"
+        )
+    return f"keys={','.join(sorted(parsed.keys())[:6])}"
+
+
+def checkpoint_stage_record(stage: StageRun) -> dict[str, Any]:
+    record = {
+        "agent": stage.agent,
+        "phase": stage.phase,
+        "mode": "read-only" if stage.read_only else "write",
+        "stage_dir": str(stage.stage_dir),
+        "workspace": str(stage.workspace),
+        "prompt_path": str(stage.prompt_path),
+        "stdout_path": str(stage.stdout_path),
+        "stderr_path": str(stage.stderr_path),
+        "verbose_path": str(stage.verbose_path),
+        "verbose_exists": stage.verbose_path.exists(),
+        "parsed_path": str(stage.parsed_path),
+        "summary": checkpoint_stage_summary(stage),
+        "duration_seconds": stage.duration_seconds,
+    }
+    if not stage.read_only:
+        record.update(
+            {
+                "package_dir": str(stage.package_dir),
+                "manifest_path": str(stage.package_dir / "manifest.json"),
+                "diff_path": str(stage.diff_path),
+                "changed_files_count": len(stage.changed_files),
+                "changed_files": list(stage.changed_files),
+            }
+        )
+    return record
+
+
+def format_changed_files_preview(changed_files: list[str], limit: int = 5) -> str:
+    if not changed_files:
+        return "none"
+    preview = ", ".join(changed_files[:limit])
+    remaining = len(changed_files) - limit
+    if remaining > 0:
+        preview += f", ... (+{remaining} more)"
+    return preview
+
+
+def format_checkpoint_inspection(
+    checkpoint_id: str,
+    description: str,
+    run_dir: Path,
+    stages: list[StageRun],
+) -> list[str]:
+    lines = [
+        f"{checkpoint_id}: {description}",
+        f"Run dir: {run_dir}",
+        f"Stages: {len(stages)}",
+    ]
+    for index, stage in enumerate(stages, start=1):
+        mode_label = "read-only" if stage.read_only else "write"
+        lines.extend(
+            [
+                f"Stage {index}: agent={stage.agent} phase={stage.phase} mode={mode_label}",
+                f"  stage_dir: {stage.stage_dir}",
+                f"  workspace: {stage.workspace}",
+                f"  prompt: {stage.prompt_path}",
+                f"  parsed: {stage.parsed_path}",
+                f"  stdout: {stage.stdout_path}",
+                f"  stderr: {stage.stderr_path}",
+                f"  summary: {checkpoint_stage_summary(stage)}",
+            ]
+        )
+        if stage.verbose_path.exists():
+            lines.append(f"  verbose: {stage.verbose_path}")
+        else:
+            lines.append("  verbose: not available for this stage")
+        if not stage.read_only:
+            lines.extend(
+                [
+                    f"  package: {stage.package_dir}",
+                    f"  manifest: {stage.package_dir / 'manifest.json'}",
+                    f"  diff: {stage.diff_path}",
+                    f"  changed_files: {len(stage.changed_files)}",
+                    f"  changed_preview: {format_changed_files_preview(stage.changed_files)}",
+                ]
+            )
+    return lines
+
+
+def read_supervisor_command(prompt: str) -> str:
+    try:
+        print(prompt, file=sys.stderr, end="", flush=True)
+        line = sys.stdin.readline()
+    except KeyboardInterrupt:
+        print("", file=sys.stderr, flush=True)
+        return "abort"
+    if line == "":
+        print("", file=sys.stderr, flush=True)
+        return "abort"
+    return line.strip()
+
+
+def run_supervisor_checkpoint(
+    checkpoint_state: CheckpointState,
+    *,
+    name: str,
+    description: str,
+    stages: list[StageRun],
+    run_dir: Path,
+) -> None:
+    if not checkpoint_state.enabled:
+        return
+    checkpoint_number = checkpoint_state.next_index
+    checkpoint_state.next_index += 1
+    checkpoint_id = f"{checkpoint_number:02d}-{name}"
+    event = {
+        "id": checkpoint_id,
+        "name": name,
+        "description": description,
+        "entered_at": utc_timestamp_precise(),
+        "run_dir": str(run_dir),
+        "stage_count": len(stages),
+        "stages": [checkpoint_stage_record(stage) for stage in stages],
+        "commands": [],
+    }
+    log_progress(f"Checkpoint {checkpoint_id} reached: {description}")
+    log_checkpoint(f"{checkpoint_id}: {description}")
+    log_checkpoint("Actions: Enter/continue, i/inspect, a/abort")
+    while True:
+        command = read_supervisor_command(f"[{checkpoint_id}] action [Enter=continue, i=inspect, a=abort]: ")
+        normalized = command.lower()
+        command_event = {
+            "timestamp": utc_timestamp_precise(),
+            "raw": command,
+        }
+        if normalized in ("", "c", "continue"):
+            command_event["normalized"] = "continue"
+            event["commands"].append(command_event)
+            event["final_action"] = "continue"
+            break
+        if normalized in ("i", "inspect"):
+            command_event["normalized"] = "inspect"
+            event["commands"].append(command_event)
+            for line in format_checkpoint_inspection(checkpoint_id, description, run_dir, stages):
+                log_checkpoint(line)
+            continue
+        if normalized in ("a", "abort"):
+            command_event["normalized"] = "abort"
+            event["commands"].append(command_event)
+            event["final_action"] = "abort"
+            break
+        if normalized in ("h", "help", "?"):
+            command_event["normalized"] = "help"
+            event["commands"].append(command_event)
+            log_checkpoint("Available commands: Enter/continue, i/inspect, a/abort")
+            continue
+        command_event["normalized"] = "invalid"
+        event["commands"].append(command_event)
+        log_checkpoint("Unknown command. Use Enter/continue, i/inspect, or a/abort.")
+    event["resolved_at"] = utc_timestamp_precise()
+    event["record_file"] = str(checkpoint_state.history_path.parent / f"{checkpoint_id}.json")
+    write_json(Path(event["record_file"]), event)
+    append_jsonl(checkpoint_state.history_path, event)
+    checkpoint_state.events.append(event)
+    if event["final_action"] == "abort":
+        log_progress(f"Checkpoint {checkpoint_id} requested abort.")
+        raise RunAborted(event)
+    log_progress(f"Checkpoint {checkpoint_id} continuing.")
+
+
 def snapshot_workspace_state(workspace: Path, git_mode: bool) -> tuple[str, str]:
     if git_mode:
         status = git(workspace, "status", "--porcelain", "--untracked-files=all").stdout
@@ -1447,6 +1688,8 @@ def run_agent_stage(
             agent=agent,
             phase=phase,
             workspace=workspace,
+            stage_dir=stage_dir,
+            read_only=read_only,
             prompt_path=result["prompt_path"],
             stdout_path=result["stdout_path"],
             stderr_path=result["stderr_path"],
@@ -1456,6 +1699,7 @@ def run_agent_stage(
             changed_files=changed_files,
             diff_path=diff_path,
             package_dir=package_dir,
+            duration_seconds=duration_seconds,
         )
     except Exception as exc:
         duration_seconds = round(time.monotonic() - started_monotonic, 3)
@@ -1573,6 +1817,7 @@ def apply_final_to_source(repo: Path, workspace: Path, changed_files: list[str])
 
 def markdown_report(data: dict[str, Any]) -> str:
     status = str(data.get("status", "completed"))
+    checkpoint_events = data.get("checkpoint_events", [])
     if status == "failed":
         lines = [
             f"# Peer Consensus Run {data['run_id']}",
@@ -1583,6 +1828,7 @@ def markdown_report(data: dict[str, Any]) -> str:
             f"- Failed phase: `{data.get('failed_phase', 'unknown')}`",
             f"- Exit code: `{data.get('exit_code', 1)}`",
             f"- Supervised: `{data.get('supervised', False)}`",
+            f"- Checkpoint supervision: `{data.get('checkpoint_supervision', False)}`",
             "",
             "## Error",
             data.get("error", "Unknown error."),
@@ -1591,8 +1837,38 @@ def markdown_report(data: dict[str, Any]) -> str:
             f"- Run dir: `{data['run_dir']}`",
             f"- Progress log: `{data.get('progress_log', '')}`",
             f"- Supervisor log: `{data.get('supervisor_log', '')}`",
+            f"- Checkpoint history: `{data.get('checkpoint_history', '')}`",
+            f"- Checkpoint events: `{len(checkpoint_events)}`",
             f"- Report file: `{Path(data['run_dir']) / 'report.json'}`",
             f"- Traceback file: `{data.get('traceback_file', '')}`",
+        ]
+        return "\n".join(lines) + "\n"
+    if status == "aborted":
+        aborted_checkpoint = data.get("aborted_checkpoint", {})
+        lines = [
+            f"# Peer Consensus Run {data['run_id']}",
+            "",
+            f"- Repo: `{data['repo']}`",
+            f"- Task: {data['task'].strip()}",
+            f"- Status: `{status}`",
+            f"- Exit code: `{data.get('exit_code', 130)}`",
+            f"- Supervised: `{data.get('supervised', False)}`",
+            f"- Checkpoint supervision: `{data.get('checkpoint_supervision', False)}`",
+            "",
+            "## Abort",
+            data.get("error", "Run aborted by supervisor."),
+            "",
+            "## Checkpoint",
+            f"- ID: `{aborted_checkpoint.get('id', '')}`",
+            f"- Description: {aborted_checkpoint.get('description', '')}",
+            "",
+            "## Artifacts",
+            f"- Run dir: `{data['run_dir']}`",
+            f"- Progress log: `{data.get('progress_log', '')}`",
+            f"- Supervisor log: `{data.get('supervisor_log', '')}`",
+            f"- Checkpoint history: `{data.get('checkpoint_history', '')}`",
+            f"- Checkpoint events: `{len(checkpoint_events)}`",
+            f"- Report file: `{Path(data['run_dir']) / 'report.json'}`",
         ]
         return "\n".join(lines) + "\n"
 
@@ -1604,6 +1880,7 @@ def markdown_report(data: dict[str, Any]) -> str:
         f"- Status: `{status}`",
         f"- Exit code: `{data.get('exit_code', 0 if data.get('final_approved') else 2)}`",
         f"- Supervised: `{data.get('supervised', False)}`",
+        f"- Checkpoint supervision: `{data.get('checkpoint_supervision', False)}`",
         f"- Final plan base: `{data['final_plan_base']}`",
         f"- Executor: `{data['executor']}`",
         f"- Reviewer: `{data['reviewer']}`",
@@ -1627,6 +1904,8 @@ def markdown_report(data: dict[str, Any]) -> str:
             f"- Run dir: `{data['run_dir']}`",
             f"- Progress log: `{data.get('progress_log', '')}`",
             f"- Supervisor log: `{data.get('supervisor_log', '')}`",
+            f"- Checkpoint history: `{data.get('checkpoint_history', '')}`",
+            f"- Checkpoint events: `{len(checkpoint_events)}`",
             f"- Final plan file: `{data['final_plan_file']}`",
             f"- Final package: `{data['final_package']}`",
         ]
@@ -1641,12 +1920,17 @@ def main() -> int:
     repo = Path(args.repo).resolve()
     task = read_task(args)
     agent_timeout = args.agent_timeout_seconds or None
+    supervise_enabled = args.supervise or args.supervise_checkpoints
     run_root = Path(args.run_root).resolve() if args.run_root else repo / ".claude" / "tmp" / "peer-consensus"
     run_id = f"{utc_now()}-{uuid.uuid4().hex[:8]}"
     run_dir = run_root / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
     progress_log_path = run_dir / "progress.log"
-    supervisor_log_path = run_dir / "supervisor.log" if args.supervise else None
+    supervisor_log_path = run_dir / "supervisor.log" if supervise_enabled else None
+    checkpoint_state = CheckpointState(
+        enabled=args.supervise_checkpoints,
+        history_path=run_dir / "checkpoints" / "history.jsonl",
+    )
     initialize_run_state(progress_log_path, supervisor_log_path)
     log_progress(
         f"Run {run_id} started for {repo}; artifacts: {run_dir}; agent-timeout={format_timeout(agent_timeout)}"
@@ -1664,7 +1948,8 @@ def main() -> int:
             "codex_model": args.codex_model,
             "review_rounds": args.review_rounds,
             "agent_timeout_seconds": args.agent_timeout_seconds,
-            "supervise": args.supervise,
+            "supervise": supervise_enabled,
+            "supervise_checkpoints": args.supervise_checkpoints,
             "apply_final": args.apply_final,
             "cleanup_workspaces": args.cleanup_workspaces,
             "keep_workspaces": args.keep_workspaces,
@@ -1674,6 +1959,14 @@ def main() -> int:
     current_phase = "prepare-workspaces"
     workspaces: WorkspaceSet | None = None
     final_report: dict[str, Any] = {}
+    final_plan_base = ""
+    final_plan_file = run_dir / "final-plan.json"
+    current_execution: StageRun | None = None
+    implementation_review: StageRun | None = None
+    final_approved = False
+
+    def checkpoint_history_value() -> str:
+        return str(checkpoint_state.history_path) if checkpoint_state.enabled else ""
 
     try:
         workspaces = prepare_workspaces(repo, run_dir, args.include_path)
@@ -1685,8 +1978,27 @@ def main() -> int:
             "codex_model": args.codex_model,
             "claude_bare": not args.no_claude_bare,
             "agent_timeout": agent_timeout,
-            "supervise": args.supervise,
+            "supervise": supervise_enabled,
         }
+
+        def maybe_checkpoint(name: str, description: str, *stages: StageRun) -> None:
+            nonlocal current_phase
+            if not checkpoint_state.enabled:
+                return
+            previous_phase = current_phase
+            current_phase = f"checkpoint-{name}"
+            try:
+                run_supervisor_checkpoint(
+                    checkpoint_state,
+                    name=name,
+                    description=description,
+                    stages=list(stages),
+                    run_dir=run_dir,
+                )
+            except Exception:
+                raise
+            else:
+                current_phase = previous_phase
 
         current_phase = "plan-consensus"
         log_progress("Phase 1/3: Plan consensus (4 parallel stages + final plan)")
@@ -1715,6 +2027,7 @@ def main() -> int:
                 "read_only": True,
             },
         )
+        maybe_checkpoint("plan-initial", "Initial plan drafts completed.", initial_claude, initial_codex)
 
         current_phase = "plan-review"
         review_claude, review_codex = run_parallel_stage_pair(
@@ -1755,6 +2068,7 @@ def main() -> int:
                 "read_only": True,
             },
         )
+        maybe_checkpoint("plan-review", "Cross-review of the initial plans completed.", review_claude, review_codex)
 
         current_phase = "plan-revise"
         revised_claude, revised_codex = run_parallel_stage_pair(
@@ -1795,6 +2109,7 @@ def main() -> int:
                 "read_only": True,
             },
         )
+        maybe_checkpoint("plan-revise", "Each side revised its plan after peer review.", revised_claude, revised_codex)
 
         current_phase = "plan-consensus-evaluate"
         consensus_claude, consensus_codex = run_parallel_stage_pair(
@@ -1836,6 +2151,12 @@ def main() -> int:
                 "stage_dir": run_dir / "stages" / "plan-consensus" / "codex",
                 "read_only": True,
             },
+        )
+        maybe_checkpoint(
+            "plan-consensus",
+            "Consensus evaluation completed and the final plan base is ready to choose.",
+            consensus_claude,
+            consensus_codex,
         )
 
         final_plan_base = choose_final_base(consensus_claude.parsed, consensus_codex.parsed)
@@ -1882,8 +2203,8 @@ def main() -> int:
             stage_dir=run_dir / "stages" / "plan-final" / final_plan_base,
             read_only=True,
         )
-        final_plan_file = run_dir / "final-plan.json"
         write_json(final_plan_file, final_plan.parsed)
+        maybe_checkpoint("plan-finalize", "Final execution plan is ready.", final_plan)
 
         current_phase = "execution"
         log_progress("Phase 2/3: Execution")
@@ -1905,9 +2226,7 @@ def main() -> int:
             stage_dir=run_dir / "stages" / "execute" / final_plan_base / "round-0",
             read_only=False,
         )
-
-        implementation_review: StageRun | None = None
-        final_approved = False
+        maybe_checkpoint("execute-initial", "Initial implementation completed.", current_execution)
 
         current_phase = "implementation-review"
         log_progress("Phase 3/3: Implementation review")
@@ -1932,6 +2251,11 @@ def main() -> int:
                 schema=REVIEW_SCHEMA,
                 stage_dir=run_dir / "stages" / "implementation-review" / f"round-{round_idx}" / reviewer_name.lower().replace(" ", "-"),
                 read_only=True,
+            )
+            maybe_checkpoint(
+                f"implementation-review-{round_idx}",
+                f"Implementation review round {round_idx} completed.",
+                implementation_review,
             )
 
             if implementation_review.parsed.get("overall_verdict") == "approve":
@@ -1966,8 +2290,19 @@ def main() -> int:
                 stage_dir=run_dir / "stages" / "execute-fix" / final_plan_base / f"round-{round_idx + 1}",
                 read_only=False,
             )
+            maybe_checkpoint(
+                f"execute-fix-{round_idx + 1}",
+                f"Execution fix round {round_idx + 1} completed.",
+                current_execution,
+            )
 
-        if args.apply_final and final_approved:
+        if args.apply_final and final_approved and current_execution is not None:
+            checkpoint_stages = [stage for stage in [current_execution, implementation_review] if stage is not None]
+            maybe_checkpoint(
+                "apply-final",
+                "Final result is approved and ready to copy back into the source workspace.",
+                *checkpoint_stages,
+            )
             current_phase = "apply-final"
             apply_final_to_source(repo, current_execution.workspace, current_execution.changed_files)
             log_progress("Applied approved final files back to the source workspace.")
@@ -1979,17 +2314,20 @@ def main() -> int:
             "run_dir": str(run_dir),
             "status": "completed",
             "exit_code": 0 if final_approved else 2,
-            "supervised": args.supervise,
+            "supervised": supervise_enabled,
+            "checkpoint_supervision": args.supervise_checkpoints,
             "progress_log": str(progress_log_path),
             "supervisor_log": str(supervisor_log_path) if supervisor_log_path else "",
+            "checkpoint_history": checkpoint_history_value(),
+            "checkpoint_events": checkpoint_state.events,
             "stage_timings": snapshot_stage_timings(),
             "final_plan_base": final_plan_base,
             "executor": final_plan_base,
             "reviewer": "codex" if final_plan_base == "claude" else "claude",
             "final_approved": final_approved,
             "final_plan_file": str(final_plan_file),
-            "final_package": str(current_execution.package_dir),
-            "final_changed_files": current_execution.changed_files,
+            "final_package": str(current_execution.package_dir) if current_execution else "",
+            "final_changed_files": current_execution.changed_files if current_execution else [],
             "implementation_review": implementation_review.parsed if implementation_review else {},
         }
         write_json(run_dir / "report.json", final_report)
@@ -1997,6 +2335,38 @@ def main() -> int:
         log_progress(f"Run {run_id} finished; final_approved={final_approved}; report={run_dir / 'report.json'}")
         print(json.dumps(final_report, ensure_ascii=True, indent=2))
         return 0 if final_approved else 2
+    except RunAborted as exc:
+        final_report = {
+            "run_id": run_id,
+            "repo": str(repo),
+            "task": task,
+            "run_dir": str(run_dir),
+            "status": "aborted",
+            "exit_code": 130,
+            "supervised": supervise_enabled,
+            "checkpoint_supervision": args.supervise_checkpoints,
+            "progress_log": str(progress_log_path),
+            "supervisor_log": str(supervisor_log_path) if supervisor_log_path else "",
+            "checkpoint_history": checkpoint_history_value(),
+            "checkpoint_events": checkpoint_state.events,
+            "stage_timings": snapshot_stage_timings(),
+            "final_plan_base": final_plan_base,
+            "executor": final_plan_base,
+            "reviewer": "codex" if final_plan_base == "claude" else ("claude" if final_plan_base else ""),
+            "final_approved": final_approved,
+            "final_plan_file": str(final_plan_file) if final_plan_file.exists() else "",
+            "final_package": str(current_execution.package_dir) if current_execution else "",
+            "final_changed_files": current_execution.changed_files if current_execution else [],
+            "implementation_review": implementation_review.parsed if implementation_review else {},
+            "aborted_checkpoint": exc.event,
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+        }
+        write_json(run_dir / "report.json", final_report)
+        write_text(run_dir / "report.md", markdown_report(final_report))
+        log_progress(f"Run {run_id} aborted at {exc.event.get('id', 'unknown')}; report={run_dir / 'report.json'}")
+        print(json.dumps(final_report, ensure_ascii=True, indent=2))
+        return 130
     except Exception as exc:
         traceback_path = run_dir / "failure-traceback.txt"
         write_text(traceback_path, traceback.format_exc())
@@ -2007,9 +2377,12 @@ def main() -> int:
             "run_dir": str(run_dir),
             "status": "failed",
             "exit_code": 1,
-            "supervised": args.supervise,
+            "supervised": supervise_enabled,
+            "checkpoint_supervision": args.supervise_checkpoints,
             "progress_log": str(progress_log_path),
             "supervisor_log": str(supervisor_log_path) if supervisor_log_path else "",
+            "checkpoint_history": checkpoint_history_value(),
+            "checkpoint_events": checkpoint_state.events,
             "stage_timings": snapshot_stage_timings(),
             "failed_phase": current_phase,
             "error_type": type(exc).__name__,
