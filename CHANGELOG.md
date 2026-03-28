@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+Nothing yet.
+
+## v0.12.0 - 2026-03-29
+
 Live supervisor recovery and richer inspection.
 
 - Added `peer-forge-live resume --state-file ...` so an existing tmux run can re-attach cleanly and recreate or respawn the supervisor pane without disturbing the live Claude/Codex panes.
