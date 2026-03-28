@@ -16,7 +16,7 @@ It also includes a separate live mode for tmux-based side-by-side supervision wh
 
 This repo is designed to install cleanly as a Claude Code skill pack while still exposing a direct CLI launcher.
 
-Current version: `v0.13.0`
+Current version: `v0.13.1`
 
 ## Structure
 

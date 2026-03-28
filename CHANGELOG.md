@@ -4,6 +4,13 @@
 
 Nothing yet.
 
+## v0.13.1 - 2026-03-29
+
+Live apply skill-documentation completeness fix.
+
+- Added `peer-forge-live` skill examples for explicit landing branches via `--branch ...` and `--branch current`.
+- Documented the baseline drift safety check and the `--allow-base-drift` override in `peer-forge-live/SKILL.md`.
+
 ## v0.13.0 - 2026-03-29
 
 Live apply / landing from approved execution packages.
