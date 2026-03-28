@@ -104,7 +104,7 @@ git clone git@github.com:andrewbai/peer-forge.git .claude/skills/peer-forge
 
 - `--agent-timeout-seconds 1800` 为每个 Claude/Codex 阶段设置超时，传 `0` 表示关闭超时。
 - `--supervise` 会把 Claude/Codex 的输出实时流式打印到终端，同时写入带前缀的详细日志，但不改变协议本身。
-- `--supervise-checkpoints` 会在 `--supervise` 的基础上增加阶段边界暂停，支持 `continue`、`inspect`、`note`、`abort`，并要求使用 `--task` 或 `--task-file`。
+- `--supervise-checkpoints` 会在 `--supervise` 的基础上增加阶段边界暂停，支持 `continue`、`inspect`、`retry`、`note`、`abort`，并要求使用 `--task` 或 `--task-file`。
 - `--cleanup-workspaces` 在运行结束后删除临时隔离工作区。
 - `--keep-workspaces` 会在启用 cleanup 时仍然保留这些隔离工作区。`--keep-run-dir` 仍可用，但已废弃。
 
@@ -176,11 +176,13 @@ git --version
 - `progress.log`
 - 启用 `--supervise` 时还会有 `supervisor.log`
 - 启用 `--supervise-checkpoints` 时还会有 `checkpoints/history.jsonl`
+- 每次 retry 还会写出类似 `checkpoints/01-plan-initial-retry-01.json` 的记录
 - 添加监督 note 后还会有 `notes/history.jsonl`
 - 隔离工作区
 - 每个阶段的 prompt
 - 模型输出
 - 每个阶段的 diff package
+- 每个 stage 的 retry 产物会落在 `<stage-dir>/retries/`
 - 最终方案文件
 - implementation review 结果
 - `report.json`
@@ -192,12 +194,13 @@ git --version
 - 同样的进度内容也会写入运行目录里的 `progress.log`。
 - 启用 `--supervise` 后，Claude/Codex 的 stdout 和 stderr 会带前缀实时打印到终端，并同步写入 run 级别的 `supervisor.log`。
 - 启用 `--supervise` 后，每个 stage 目录下也会多出一个带前缀的 `<stage-dir>/verbose.log`，和原始的 `stdout.txt` / `stderr.txt` 并存。
-- 启用 `--supervise-checkpoints` 后，每个主要阶段边界都会暂停。你可以选择 `continue`、`inspect`、`note` 或 `abort`，但不会改变 agent 协议和工作区隔离。
-- `note` 会记录一条对双方对称生效的监督意见，并从后续阶段开始注入到双方 prompt。多行输入以单独一行 `---` 结束。
-- `inspect` 会打印当前 stage 的关键产物路径、当前 active supervisor notes、`parsed.json`、`stdout.txt`、`stderr.txt`、存在时的 `verbose.log`，以及写阶段的 diff/package 路径。
+- 启用 `--supervise-checkpoints` 后，每个主要阶段边界都会暂停。你可以选择 `continue`、`inspect`、`retry`、`note` 或 `abort`，但不会改变 agent 协议和工作区隔离。
+- `retry` 会安全地重跑当前 checkpoint 对应的阶段。并行 plan checkpoint 会同时重跑双方；写阶段会先恢复到该阶段入口快照；`apply-final` 仍然只支持 inspect/continue/abort。
+- `note` 会记录一条对双方对称生效的监督意见，并从后续阶段开始注入到双方 prompt。多行输入以单独一行 `---` 结束。同一个 checkpoint 里新增的 note 不会影响这个 checkpoint 自己的 retry。
+- `inspect` 会打印当前 stage 的关键产物路径、当前 active supervisor notes、retry 摘要、`parsed.json`、`stdout.txt`、`stderr.txt`、存在时的 `verbose.log`，以及写阶段的 diff/package 路径。
 - 最终机器可读输出仍然会以 JSON 形式写到 `stdout`。
 - 无论运行完成、用户中止还是中途失败，都会写出 `report.json` 和 `report.md`。
-- `report.json` 里还会包含 `progress_log`、`supervisor_log`、`checkpoint_history`、`checkpoint_events`、`notes_history`、`supervisor_notes` 路径/记录，以及结构化的 `stage_timings` 阶段耗时信息。
+- `report.json` 里还会包含 `progress_log`、`supervisor_log`、`checkpoint_history`、`checkpoint_events`、`retry_attempts`、`notes_history`、`supervisor_notes` 路径/记录，以及结构化的 `stage_timings` 阶段耗时信息。
 
 ## Skills 说明
 

@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+Supervisor notes and safe checkpoint retries.
+
+- Added symmetric supervisor `note` support so humans can inject later-phase guidance without polluting already-completed stages.
+- Added checkpoint `retry` support with safe stage-entry restoration for write phases and isolated retry artifact directories.
+- Added per-retry checkpoint JSON records plus `retry_attempts` metadata in `report.json` and `report.md`.
+- Updated the English and Chinese docs for checkpoint retry behavior, note semantics, and retry artifacts.
+
 ## v0.9.0 - 2026-03-29
 
 Supervisor visibility and checkpoint control.

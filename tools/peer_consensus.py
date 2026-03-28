@@ -18,7 +18,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, TextIO
+from typing import Any, Callable, TextIO
 
 
 TEMP_COMMIT_NAME = "peer-consensus"
@@ -213,6 +213,8 @@ class StageRun:
     phase: str
     workspace: Path
     stage_dir: Path
+    root_stage_dir: Path
+    shared_dirs: list[Path]
     read_only: bool
     prompt_path: Path
     stdout_path: Path
@@ -224,6 +226,15 @@ class StageRun:
     diff_path: Path
     package_dir: Path
     duration_seconds: float
+    attempt: int = 0
+    entry_snapshot: WorkspaceSnapshot | None = None
+
+
+@dataclass
+class WorkspaceSnapshot:
+    workspace: Path
+    snapshot_dir: Path
+    mode: str
 
 
 @dataclass
@@ -232,6 +243,7 @@ class CheckpointState:
     history_path: Path
     notes_history_path: Path
     events: list[dict[str, Any]] = field(default_factory=list)
+    retry_events: list[dict[str, Any]] = field(default_factory=list)
     notes: list[dict[str, Any]] = field(default_factory=list)
     next_index: int = 1
     next_note_index: int = 1
@@ -576,7 +588,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--supervise-checkpoints",
         action="store_true",
-        help="Pause at stage boundaries for supervisor commands (continue, inspect, note, abort). Implies --supervise.",
+        help="Pause at stage boundaries for supervisor commands (continue, inspect, retry, note, abort). Implies --supervise.",
     )
     parser.add_argument(
         "--cleanup-workspaces",
@@ -958,6 +970,64 @@ def create_empty_package(package_dir: Path) -> tuple[list[str], Path]:
     return [], diff_path
 
 
+def snapshot_workspace_entry(workspace: Path, git_mode: bool, snapshot_dir: Path) -> WorkspaceSnapshot:
+    if snapshot_dir.exists():
+        shutil.rmtree(snapshot_dir, ignore_errors=True)
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+    if git_mode:
+        tracked_diff_path = snapshot_dir / "tracked.diff"
+        untracked_list_path = snapshot_dir / "untracked.txt"
+        untracked_root = snapshot_dir / "untracked"
+        write_text(tracked_diff_path, git(workspace, "diff", "--binary", "HEAD").stdout)
+        untracked = git(workspace, "ls-files", "--others", "--exclude-standard").stdout.splitlines()
+        write_text(untracked_list_path, "\n".join(untracked) + ("\n" if untracked else ""))
+        for rel in untracked:
+            copy_path(workspace, untracked_root, rel)
+        write_json(
+            snapshot_dir / "manifest.json",
+            {
+                "mode": "git",
+                "workspace": str(workspace),
+                "tracked_diff": str(tracked_diff_path),
+                "untracked_list": str(untracked_list_path),
+                "untracked_files": untracked,
+            },
+        )
+        return WorkspaceSnapshot(workspace=workspace, snapshot_dir=snapshot_dir, mode="git")
+    tree_dir = snapshot_dir / "tree"
+    shutil.copytree(workspace, tree_dir, dirs_exist_ok=True)
+    write_json(
+        snapshot_dir / "manifest.json",
+        {
+            "mode": "tree",
+            "workspace": str(workspace),
+            "tree_dir": str(tree_dir),
+        },
+    )
+    return WorkspaceSnapshot(workspace=workspace, snapshot_dir=snapshot_dir, mode="tree")
+
+
+def restore_workspace_snapshot(snapshot: WorkspaceSnapshot) -> None:
+    workspace = snapshot.workspace
+    snapshot_dir = snapshot.snapshot_dir
+    if snapshot.mode == "git":
+        git(workspace, "reset", "--hard", "HEAD")
+        git(workspace, "clean", "-fdx")
+        tracked_diff_path = snapshot_dir / "tracked.diff"
+        tracked_diff = tracked_diff_path.read_text(encoding="utf-8") if tracked_diff_path.exists() else ""
+        if tracked_diff.strip():
+            git(workspace, "apply", "--allow-empty", "--binary", str(tracked_diff_path))
+        untracked_root = snapshot_dir / "untracked"
+        untracked_list_path = snapshot_dir / "untracked.txt"
+        if untracked_list_path.exists():
+            for rel in [line.strip() for line in untracked_list_path.read_text(encoding="utf-8").splitlines() if line.strip()]:
+                copy_path(untracked_root, workspace, rel)
+        return
+    if workspace.exists():
+        shutil.rmtree(workspace, ignore_errors=True)
+    shutil.copytree(snapshot_dir / "tree", workspace)
+
+
 def prompt_header(task: str, acceptance: list[str], scope: list[str]) -> str:
     acceptance_block = "\n".join(f"- {item}" for item in acceptance) or "- No extra acceptance criteria were provided."
     scope_block = "\n".join(f"- {item}" for item in scope) or "- Scope is not explicitly constrained. Keep changes minimal."
@@ -1326,8 +1396,10 @@ def checkpoint_stage_record(stage: StageRun) -> dict[str, Any]:
     record = {
         "agent": stage.agent,
         "phase": stage.phase,
+        "attempt": stage.attempt,
         "mode": "read-only" if stage.read_only else "write",
         "stage_dir": str(stage.stage_dir),
+        "root_stage_dir": str(stage.root_stage_dir),
         "workspace": str(stage.workspace),
         "prompt_path": str(stage.prompt_path),
         "stdout_path": str(stage.stdout_path),
@@ -1338,6 +1410,8 @@ def checkpoint_stage_record(stage: StageRun) -> dict[str, Any]:
         "summary": checkpoint_stage_summary(stage),
         "duration_seconds": stage.duration_seconds,
     }
+    if stage.entry_snapshot is not None:
+        record["entry_snapshot_dir"] = str(stage.entry_snapshot.snapshot_dir)
     if not stage.read_only:
         record.update(
             {
@@ -1380,6 +1454,7 @@ def format_checkpoint_inspection(
     stages: list[StageRun],
     active_notes: list[dict[str, Any]],
     notes_history_path: Path,
+    retry_attempts: list[dict[str, Any]],
 ) -> list[str]:
     lines = [
         f"{checkpoint_id}: {description}",
@@ -1395,12 +1470,22 @@ def format_checkpoint_inspection(
             )
     else:
         lines.append("Active supervisor notes: none")
+    if retry_attempts:
+        lines.append(f"Retry attempts: {len(retry_attempts)}")
+        for retry_event in retry_attempts[-5:]:
+            retry_line = f"  attempt {retry_event.get('attempt', '?')}: status={retry_event.get('status', 'unknown')}"
+            if retry_event.get("status") == "failed":
+                retry_line += f" error=\"{clip_text(str(retry_event.get('error', '')))}\""
+            lines.append(retry_line)
+    else:
+        lines.append("Retry attempts: none")
     for index, stage in enumerate(stages, start=1):
         mode_label = "read-only" if stage.read_only else "write"
         lines.extend(
             [
-                f"Stage {index}: agent={stage.agent} phase={stage.phase} mode={mode_label}",
+                f"Stage {index}: agent={stage.agent} phase={stage.phase} attempt={stage.attempt} mode={mode_label}",
                 f"  stage_dir: {stage.stage_dir}",
+                f"  root_stage_dir: {stage.root_stage_dir}",
                 f"  workspace: {stage.workspace}",
                 f"  prompt: {stage.prompt_path}",
                 f"  parsed: {stage.parsed_path}",
@@ -1409,6 +1494,8 @@ def format_checkpoint_inspection(
                 f"  summary: {checkpoint_stage_summary(stage)}",
             ]
         )
+        if stage.entry_snapshot is not None:
+            lines.append(f"  entry_snapshot: {stage.entry_snapshot.snapshot_dir}")
         if stage.verbose_path.exists():
             lines.append(f"  verbose: {stage.verbose_path}")
         else:
@@ -1472,6 +1559,7 @@ def run_supervisor_checkpoint(
     stages: list[StageRun],
     run_dir: Path,
     next_note_phase: str | None,
+    retry_fn: Callable[[int], list[StageRun]] | None = None,
 ) -> None:
     if not checkpoint_state.enabled:
         return
@@ -1487,19 +1575,26 @@ def run_supervisor_checkpoint(
         "stage_count": len(stages),
         "stages": [checkpoint_stage_record(stage) for stage in stages],
         "active_notes": [supervisor_note_record(note) for note in checkpoint_state.notes],
+        "retry_attempts": [],
         "commands": [],
     }
     log_progress(f"Checkpoint {checkpoint_id} reached: {description}")
     log_checkpoint(f"{checkpoint_id}: {description}")
-    if next_note_phase is None:
-        log_checkpoint("Actions: Enter/continue, i/inspect, a/abort")
-    else:
-        log_checkpoint("Actions: Enter/continue, i/inspect, n/note, a/abort")
+    available_commands = ["Enter/continue", "i/inspect"]
+    prompt_commands = ["Enter=continue", "i=inspect"]
+    if retry_fn is not None:
+        available_commands.append("r/retry")
+        prompt_commands.append("r=retry")
+    if next_note_phase is not None:
+        available_commands.append("n/note")
+        prompt_commands.append("n=note")
+    available_commands.append("a/abort")
+    prompt_commands.append("a=abort")
+    available_commands_text = ", ".join(available_commands)
+    prompt_commands_text = ", ".join(prompt_commands)
+    log_checkpoint(f"Actions: {available_commands_text}")
     while True:
-        if next_note_phase is None:
-            prompt = f"[{checkpoint_id}] action [Enter=continue, i=inspect, a=abort]: "
-        else:
-            prompt = f"[{checkpoint_id}] action [Enter=continue, i=inspect, n=note, a=abort]: "
+        prompt = f"[{checkpoint_id}] action [{prompt_commands_text}]: "
         command = read_supervisor_command(prompt)
         normalized = command.lower()
         command_event = {
@@ -1521,8 +1616,60 @@ def run_supervisor_checkpoint(
                 stages,
                 checkpoint_state.notes,
                 checkpoint_state.notes_history_path,
+                event["retry_attempts"],
             ):
                 log_checkpoint(line)
+            continue
+        if normalized in ("r", "retry"):
+            command_event["normalized"] = "retry"
+            if retry_fn is None:
+                command_event["result"] = "unavailable"
+                event["commands"].append(command_event)
+                log_checkpoint(f"{checkpoint_id}: retry is not available at this checkpoint.")
+                continue
+            retry_attempt = len(event["retry_attempts"]) + 1
+            retry_event = {
+                "checkpoint_id": checkpoint_id,
+                "checkpoint_name": name,
+                "attempt": retry_attempt,
+                "started_at": utc_timestamp_precise(),
+                "stages_before": [checkpoint_stage_record(stage) for stage in stages],
+            }
+            command_event["attempt"] = retry_attempt
+            log_checkpoint(f"{checkpoint_id}: starting retry attempt {retry_attempt}.")
+            try:
+                new_stages = retry_fn(retry_attempt)
+            except Exception as exc:
+                retry_event["status"] = "failed"
+                retry_event["ended_at"] = utc_timestamp_precise()
+                retry_event["error_type"] = type(exc).__name__
+                retry_event["error"] = str(exc)
+                retry_event["record_file"] = str(
+                    checkpoint_state.history_path.parent / f"{checkpoint_id}-retry-{retry_attempt:02d}.json"
+                )
+                write_json(Path(retry_event["record_file"]), retry_event)
+                event["retry_attempts"].append(retry_event)
+                checkpoint_state.retry_events.append(retry_event)
+                command_event["result"] = "failed"
+                command_event["error_type"] = type(exc).__name__
+                event["commands"].append(command_event)
+                log_checkpoint(f"{checkpoint_id}: retry attempt {retry_attempt} failed: {exc}")
+                continue
+            stages[:] = list(new_stages)
+            event["stage_count"] = len(stages)
+            event["stages"] = [checkpoint_stage_record(stage) for stage in stages]
+            retry_event["status"] = "completed"
+            retry_event["ended_at"] = utc_timestamp_precise()
+            retry_event["stages_after"] = [checkpoint_stage_record(stage) for stage in stages]
+            retry_event["record_file"] = str(
+                checkpoint_state.history_path.parent / f"{checkpoint_id}-retry-{retry_attempt:02d}.json"
+            )
+            write_json(Path(retry_event["record_file"]), retry_event)
+            event["retry_attempts"].append(retry_event)
+            checkpoint_state.retry_events.append(retry_event)
+            command_event["result"] = "completed"
+            event["commands"].append(command_event)
+            log_checkpoint(f"{checkpoint_id}: retry attempt {retry_attempt} completed.")
             continue
         if normalized in ("n", "note"):
             command_event["normalized"] = "note"
@@ -1557,6 +1704,7 @@ def run_supervisor_checkpoint(
             command_event["result"] = "added"
             command_event["note_id"] = note_id
             event["commands"].append(command_event)
+            event["active_notes"] = [supervisor_note_record(active_note) for active_note in checkpoint_state.notes]
             log_checkpoint(
                 f"{checkpoint_id}: added {note_id}; applies from {next_note_phase}; summary=\"{note_summary(note)}\""
             )
@@ -1569,17 +1717,14 @@ def run_supervisor_checkpoint(
         if normalized in ("h", "help", "?"):
             command_event["normalized"] = "help"
             event["commands"].append(command_event)
-            if next_note_phase is None:
-                log_checkpoint("Available commands: Enter/continue, i/inspect, a/abort")
-            else:
-                log_checkpoint("Available commands: Enter/continue, i/inspect, n/note, a/abort")
+            log_checkpoint(f"Available commands: {available_commands_text}")
             continue
         command_event["normalized"] = "invalid"
         event["commands"].append(command_event)
-        if next_note_phase is None:
-            log_checkpoint("Unknown command. Use Enter/continue, i/inspect, or a/abort.")
-        else:
-            log_checkpoint("Unknown command. Use Enter/continue, i/inspect, n/note, or a/abort.")
+        log_checkpoint(f"Unknown command. Use {available_commands_text}.")
+    event["stage_count"] = len(stages)
+    event["stages"] = [checkpoint_stage_record(stage) for stage in stages]
+    event["active_notes"] = [supervisor_note_record(note) for note in checkpoint_state.notes]
     event["resolved_at"] = utc_timestamp_precise()
     event["record_file"] = str(checkpoint_state.history_path.parent / f"{checkpoint_id}.json")
     write_json(Path(event["record_file"]), event)
@@ -1784,12 +1929,17 @@ def run_agent_stage(
     agent_timeout: int | None,
     supervise: bool,
     read_only: bool,
+    root_stage_dir: Path | None = None,
+    attempt: int = 0,
+    entry_snapshot: WorkspaceSnapshot | None = None,
 ) -> StageRun:
     mode_label = "read-only" if read_only else "write"
+    root_stage_dir = root_stage_dir or stage_dir
     started_monotonic = time.monotonic()
     started_at = utc_timestamp_precise()
+    retry_label = f", retry={attempt}" if attempt else ""
     log_progress(
-        f"{phase}: {agent} started ({mode_label}, timeout={format_timeout(agent_timeout)})"
+        f"{phase}: {agent} started ({mode_label}, timeout={format_timeout(agent_timeout)}{retry_label})"
     )
     before_status = ""
     before_diff = ""
@@ -1797,6 +1947,8 @@ def run_agent_stage(
     try:
         if read_only:
             before_status, before_diff = snapshot_workspace_state(workspace, git_mode)
+        elif entry_snapshot is None:
+            entry_snapshot = snapshot_workspace_entry(workspace, git_mode, root_stage_dir / "entry-snapshot")
         if agent == "claude":
             result = run_claude(
                 prompt,
@@ -1843,11 +1995,13 @@ def run_agent_stage(
                 "agent": agent,
                 "status": "completed",
                 "read_only": read_only,
+                "attempt": attempt,
                 "started_at": started_at,
                 "ended_at": ended_at,
                 "duration_seconds": duration_seconds,
                 "timeout_seconds": agent_timeout,
                 "stage_dir": str(stage_dir),
+                "root_stage_dir": str(root_stage_dir),
             }
         )
         duration = format_duration(duration_seconds)
@@ -1859,6 +2013,8 @@ def run_agent_stage(
             phase=phase,
             workspace=workspace,
             stage_dir=stage_dir,
+            root_stage_dir=root_stage_dir,
+            shared_dirs=list(shared_dirs),
             read_only=read_only,
             prompt_path=result["prompt_path"],
             stdout_path=result["stdout_path"],
@@ -1870,6 +2026,8 @@ def run_agent_stage(
             diff_path=diff_path,
             package_dir=package_dir,
             duration_seconds=duration_seconds,
+            attempt=attempt,
+            entry_snapshot=entry_snapshot,
         )
     except Exception as exc:
         duration_seconds = round(time.monotonic() - started_monotonic, 3)
@@ -1880,17 +2038,152 @@ def run_agent_stage(
                 "agent": agent,
                 "status": "failed",
                 "read_only": read_only,
+                "attempt": attempt,
                 "started_at": started_at,
                 "ended_at": ended_at,
                 "duration_seconds": duration_seconds,
                 "timeout_seconds": agent_timeout,
                 "stage_dir": str(stage_dir),
+                "root_stage_dir": str(root_stage_dir),
                 "error_type": type(exc).__name__,
                 "error": str(exc),
             }
         )
         duration = format_duration(duration_seconds)
         log_progress(f"{phase}: {agent} failed after {duration}: {exc}")
+        raise
+
+
+def build_retry_stage_kwargs(
+    stage: StageRun,
+    *,
+    retry_index: int,
+    schema: dict[str, Any],
+    baseline: Path,
+    git_mode: bool,
+    claude_model: str | None,
+    codex_model: str | None,
+    claude_bare: bool,
+    agent_timeout: int | None,
+    supervise: bool,
+) -> dict[str, Any]:
+    return {
+        "agent": stage.agent,
+        "phase": stage.phase,
+        "workspace": stage.workspace,
+        "baseline": baseline,
+        "git_mode": git_mode,
+        "shared_dirs": list(stage.shared_dirs),
+        "prompt": stage.prompt_path.read_text(encoding="utf-8"),
+        "schema": schema,
+        "stage_dir": stage.root_stage_dir / "retries" / f"retry-{retry_index}",
+        "claude_model": claude_model,
+        "codex_model": codex_model,
+        "claude_bare": claude_bare,
+        "agent_timeout": agent_timeout,
+        "supervise": supervise,
+        "read_only": stage.read_only,
+        "root_stage_dir": stage.root_stage_dir,
+        "attempt": retry_index,
+        "entry_snapshot": stage.entry_snapshot,
+    }
+
+
+def retry_stage_from_checkpoint(
+    stage: StageRun,
+    *,
+    retry_index: int,
+    schema: dict[str, Any],
+    baseline: Path,
+    git_mode: bool,
+    claude_model: str | None,
+    codex_model: str | None,
+    claude_bare: bool,
+    agent_timeout: int | None,
+    supervise: bool,
+) -> StageRun:
+    if stage.entry_snapshot is not None:
+        log_progress(f"{stage.phase}: restoring stage-entry snapshot before retry {retry_index}")
+        restore_workspace_snapshot(stage.entry_snapshot)
+    try:
+        return run_agent_stage(
+            **build_retry_stage_kwargs(
+                stage,
+                retry_index=retry_index,
+                schema=schema,
+                baseline=baseline,
+                git_mode=git_mode,
+                claude_model=claude_model,
+                codex_model=codex_model,
+                claude_bare=claude_bare,
+                agent_timeout=agent_timeout,
+                supervise=supervise,
+            )
+        )
+    except Exception:
+        if stage.entry_snapshot is not None:
+            log_progress(f"{stage.phase}: restoring stage-entry snapshot after failed retry {retry_index}")
+            restore_workspace_snapshot(stage.entry_snapshot)
+        raise
+
+
+def retry_parallel_stage_pair_from_checkpoint(
+    first: StageRun,
+    second: StageRun,
+    *,
+    retry_index: int,
+    first_schema: dict[str, Any],
+    second_schema: dict[str, Any],
+    baseline: Path,
+    git_mode: bool,
+    claude_model: str | None,
+    codex_model: str | None,
+    claude_bare: bool,
+    agent_timeout: int | None,
+    supervise: bool,
+) -> tuple[StageRun, StageRun]:
+    stage_specs = {
+        first.agent: (first, first_schema),
+        second.agent: (second, second_schema),
+    }
+    if set(stage_specs) != {"claude", "codex"}:
+        raise RuntimeError("Parallel retries require one Claude stage and one Codex stage.")
+    for stage, _schema in stage_specs.values():
+        if stage.entry_snapshot is not None:
+            log_progress(f"{stage.phase}: restoring stage-entry snapshot before retry {retry_index}")
+            restore_workspace_snapshot(stage.entry_snapshot)
+    try:
+        return run_parallel_stage_pair(
+            claude_kwargs=build_retry_stage_kwargs(
+                stage_specs["claude"][0],
+                retry_index=retry_index,
+                schema=stage_specs["claude"][1],
+                baseline=baseline,
+                git_mode=git_mode,
+                claude_model=claude_model,
+                codex_model=codex_model,
+                claude_bare=claude_bare,
+                agent_timeout=agent_timeout,
+                supervise=supervise,
+            ),
+            codex_kwargs=build_retry_stage_kwargs(
+                stage_specs["codex"][0],
+                retry_index=retry_index,
+                schema=stage_specs["codex"][1],
+                baseline=baseline,
+                git_mode=git_mode,
+                claude_model=claude_model,
+                codex_model=codex_model,
+                claude_bare=claude_bare,
+                agent_timeout=agent_timeout,
+                supervise=supervise,
+            ),
+        )
+    except Exception:
+        for stage, _schema in stage_specs.values():
+            if stage.entry_snapshot is not None:
+                log_progress(f"{stage.phase}: restoring stage-entry snapshot after failed retry {retry_index}")
+                restore_workspace_snapshot(stage.entry_snapshot)
         raise
 
 
@@ -1988,6 +2281,7 @@ def apply_final_to_source(repo: Path, workspace: Path, changed_files: list[str])
 def markdown_report(data: dict[str, Any]) -> str:
     status = str(data.get("status", "completed"))
     checkpoint_events = data.get("checkpoint_events", [])
+    retry_attempts = data.get("retry_attempts", [])
     supervisor_notes = data.get("supervisor_notes", [])
     if status == "failed":
         lines = [
@@ -2010,6 +2304,7 @@ def markdown_report(data: dict[str, Any]) -> str:
             f"- Supervisor log: `{data.get('supervisor_log', '')}`",
             f"- Checkpoint history: `{data.get('checkpoint_history', '')}`",
             f"- Checkpoint events: `{len(checkpoint_events)}`",
+            f"- Retry attempts: `{len(retry_attempts)}`",
             f"- Notes history: `{data.get('notes_history', '')}`",
             f"- Supervisor notes: `{len(supervisor_notes)}`",
             f"- Report file: `{Path(data['run_dir']) / 'report.json'}`",
@@ -2041,6 +2336,7 @@ def markdown_report(data: dict[str, Any]) -> str:
             f"- Supervisor log: `{data.get('supervisor_log', '')}`",
             f"- Checkpoint history: `{data.get('checkpoint_history', '')}`",
             f"- Checkpoint events: `{len(checkpoint_events)}`",
+            f"- Retry attempts: `{len(retry_attempts)}`",
             f"- Notes history: `{data.get('notes_history', '')}`",
             f"- Supervisor notes: `{len(supervisor_notes)}`",
             f"- Report file: `{Path(data['run_dir']) / 'report.json'}`",
@@ -2068,6 +2364,19 @@ def markdown_report(data: dict[str, Any]) -> str:
         lines.extend(f"- `{item}`" for item in final_files)
     else:
         lines.append("- None")
+    lines.extend(["", "## Retry Attempts"])
+    if retry_attempts:
+        lines.extend(
+            f"- `{item.get('checkpoint_id', '')}` attempt `{item.get('attempt', '?')}`: `{item.get('status', 'unknown')}`"
+            + (
+                f" - {clip_text(str(item.get('error', '')))}"
+                if item.get("status") == "failed" and item.get("error")
+                else ""
+            )
+            for item in retry_attempts
+        )
+    else:
+        lines.append("- None")
     lines.extend(["", "## Supervisor Notes"])
     if supervisor_notes:
         lines.extend(
@@ -2089,6 +2398,7 @@ def markdown_report(data: dict[str, Any]) -> str:
             f"- Supervisor log: `{data.get('supervisor_log', '')}`",
             f"- Checkpoint history: `{data.get('checkpoint_history', '')}`",
             f"- Checkpoint events: `{len(checkpoint_events)}`",
+            f"- Retry attempts: `{len(retry_attempts)}`",
             f"- Notes history: `{data.get('notes_history', '')}`",
             f"- Supervisor notes: `{len(supervisor_notes)}`",
             f"- Final plan file: `{data['final_plan_file']}`",
@@ -2173,7 +2483,13 @@ def main() -> int:
             "supervise": supervise_enabled,
         }
 
-        def maybe_checkpoint(name: str, description: str, *stages: StageRun, next_note_phase: str | None) -> None:
+        def maybe_checkpoint(
+            name: str,
+            description: str,
+            *stages: StageRun,
+            next_note_phase: str | None,
+            retry_fn: Callable[[int], list[StageRun]] | None = None,
+        ) -> None:
             nonlocal current_phase
             if not checkpoint_state.enabled:
                 return
@@ -2187,6 +2503,7 @@ def main() -> int:
                     stages=list(stages),
                     run_dir=run_dir,
                     next_note_phase=next_note_phase,
+                    retry_fn=retry_fn,
                 )
             except Exception:
                 raise
@@ -2220,12 +2537,24 @@ def main() -> int:
                 "read_only": True,
             },
         )
+        def retry_plan_initial(retry_index: int) -> list[StageRun]:
+            nonlocal initial_claude, initial_codex
+            initial_claude, initial_codex = retry_parallel_stage_pair_from_checkpoint(
+                initial_claude,
+                initial_codex,
+                retry_index=retry_index,
+                first_schema=PLAN_SCHEMA,
+                second_schema=PLAN_SCHEMA,
+                **common_stage_kwargs,
+            )
+            return [initial_claude, initial_codex]
         maybe_checkpoint(
             "plan-initial",
             "Initial plan drafts completed.",
             initial_claude,
             initial_codex,
             next_note_phase="plan-review",
+            retry_fn=retry_plan_initial,
         )
 
         current_phase = "plan-review"
@@ -2269,12 +2598,24 @@ def main() -> int:
                 "read_only": True,
             },
         )
+        def retry_plan_review(retry_index: int) -> list[StageRun]:
+            nonlocal review_claude, review_codex
+            review_claude, review_codex = retry_parallel_stage_pair_from_checkpoint(
+                review_claude,
+                review_codex,
+                retry_index=retry_index,
+                first_schema=REVIEW_SCHEMA,
+                second_schema=REVIEW_SCHEMA,
+                **common_stage_kwargs,
+            )
+            return [review_claude, review_codex]
         maybe_checkpoint(
             "plan-review",
             "Cross-review of the initial plans completed.",
             review_claude,
             review_codex,
             next_note_phase="plan-revise",
+            retry_fn=retry_plan_review,
         )
 
         current_phase = "plan-revise"
@@ -2318,12 +2659,24 @@ def main() -> int:
                 "read_only": True,
             },
         )
+        def retry_plan_revise(retry_index: int) -> list[StageRun]:
+            nonlocal revised_claude, revised_codex
+            revised_claude, revised_codex = retry_parallel_stage_pair_from_checkpoint(
+                revised_claude,
+                revised_codex,
+                retry_index=retry_index,
+                first_schema=PLAN_REVISION_SCHEMA,
+                second_schema=PLAN_REVISION_SCHEMA,
+                **common_stage_kwargs,
+            )
+            return [revised_claude, revised_codex]
         maybe_checkpoint(
             "plan-revise",
             "Each side revised its plan after peer review.",
             revised_claude,
             revised_codex,
             next_note_phase="plan-consensus",
+            retry_fn=retry_plan_revise,
         )
 
         current_phase = "plan-consensus-evaluate"
@@ -2369,12 +2722,24 @@ def main() -> int:
                 "read_only": True,
             },
         )
+        def retry_plan_consensus(retry_index: int) -> list[StageRun]:
+            nonlocal consensus_claude, consensus_codex
+            consensus_claude, consensus_codex = retry_parallel_stage_pair_from_checkpoint(
+                consensus_claude,
+                consensus_codex,
+                retry_index=retry_index,
+                first_schema=CONSENSUS_SCHEMA,
+                second_schema=CONSENSUS_SCHEMA,
+                **common_stage_kwargs,
+            )
+            return [consensus_claude, consensus_codex]
         maybe_checkpoint(
             "plan-consensus",
             "Consensus evaluation completed and the final plan base is ready to choose.",
             consensus_claude,
             consensus_codex,
             next_note_phase="plan-finalize",
+            retry_fn=retry_plan_consensus,
         )
 
         final_plan_base = choose_final_base(consensus_claude.parsed, consensus_codex.parsed)
@@ -2423,11 +2788,22 @@ def main() -> int:
             read_only=True,
         )
         write_json(final_plan_file, final_plan.parsed)
+        def retry_plan_finalize(retry_index: int) -> list[StageRun]:
+            nonlocal final_plan
+            final_plan = retry_stage_from_checkpoint(
+                final_plan,
+                retry_index=retry_index,
+                schema=FINAL_PLAN_SCHEMA,
+                **common_stage_kwargs,
+            )
+            write_json(final_plan_file, final_plan.parsed)
+            return [final_plan]
         maybe_checkpoint(
             "plan-finalize",
             "Final execution plan is ready.",
             final_plan,
             next_note_phase="execute-initial",
+            retry_fn=retry_plan_finalize,
         )
 
         current_phase = "execution"
@@ -2451,11 +2827,21 @@ def main() -> int:
             stage_dir=run_dir / "stages" / "execute" / final_plan_base / "round-0",
             read_only=False,
         )
+        def retry_execute_initial(retry_index: int) -> list[StageRun]:
+            nonlocal current_execution
+            current_execution = retry_stage_from_checkpoint(
+                current_execution,
+                retry_index=retry_index,
+                schema=EXECUTION_SCHEMA,
+                **common_stage_kwargs,
+            )
+            return [current_execution]
         maybe_checkpoint(
             "execute-initial",
             "Initial implementation completed.",
             current_execution,
             next_note_phase="implementation-review-0",
+            retry_fn=retry_execute_initial,
         )
 
         current_phase = "implementation-review"
@@ -2486,11 +2872,21 @@ def main() -> int:
             review_next_note_phase = None
             if implementation_review.parsed.get("overall_verdict") != "approve" and round_idx < args.review_rounds:
                 review_next_note_phase = f"execute-fix-{round_idx + 1}"
+            def retry_implementation_review(retry_index: int) -> list[StageRun]:
+                nonlocal implementation_review
+                implementation_review = retry_stage_from_checkpoint(
+                    implementation_review,
+                    retry_index=retry_index,
+                    schema=REVIEW_SCHEMA,
+                    **common_stage_kwargs,
+                )
+                return [implementation_review]
             maybe_checkpoint(
                 f"implementation-review-{round_idx}",
                 f"Implementation review round {round_idx} completed.",
                 implementation_review,
                 next_note_phase=review_next_note_phase,
+                retry_fn=retry_implementation_review,
             )
 
             if implementation_review.parsed.get("overall_verdict") == "approve":
@@ -2526,11 +2922,21 @@ def main() -> int:
                 stage_dir=run_dir / "stages" / "execute-fix" / final_plan_base / f"round-{round_idx + 1}",
                 read_only=False,
             )
+            def retry_execute_fix(retry_index: int) -> list[StageRun]:
+                nonlocal current_execution
+                current_execution = retry_stage_from_checkpoint(
+                    current_execution,
+                    retry_index=retry_index,
+                    schema=EXECUTION_SCHEMA,
+                    **common_stage_kwargs,
+                )
+                return [current_execution]
             maybe_checkpoint(
                 f"execute-fix-{round_idx + 1}",
                 f"Execution fix round {round_idx + 1} completed.",
                 current_execution,
                 next_note_phase=f"implementation-review-{round_idx + 1}",
+                retry_fn=retry_execute_fix,
             )
 
         if args.apply_final and final_approved and current_execution is not None:
@@ -2558,6 +2964,8 @@ def main() -> int:
             "supervisor_log": str(supervisor_log_path) if supervisor_log_path else "",
             "checkpoint_history": checkpoint_history_value(),
             "checkpoint_events": checkpoint_state.events,
+            "retry_attempts_count": len(checkpoint_state.retry_events),
+            "retry_attempts": checkpoint_state.retry_events,
             "notes_history": notes_history_value(),
             "supervisor_notes_count": len(checkpoint_state.notes),
             "supervisor_notes": checkpoint_state.notes,
@@ -2590,6 +2998,8 @@ def main() -> int:
             "supervisor_log": str(supervisor_log_path) if supervisor_log_path else "",
             "checkpoint_history": checkpoint_history_value(),
             "checkpoint_events": checkpoint_state.events,
+            "retry_attempts_count": len(checkpoint_state.retry_events),
+            "retry_attempts": checkpoint_state.retry_events,
             "notes_history": notes_history_value(),
             "supervisor_notes_count": len(checkpoint_state.notes),
             "supervisor_notes": checkpoint_state.notes,
@@ -2627,6 +3037,8 @@ def main() -> int:
             "supervisor_log": str(supervisor_log_path) if supervisor_log_path else "",
             "checkpoint_history": checkpoint_history_value(),
             "checkpoint_events": checkpoint_state.events,
+            "retry_attempts_count": len(checkpoint_state.retry_events),
+            "retry_attempts": checkpoint_state.retry_events,
             "notes_history": notes_history_value(),
             "supervisor_notes_count": len(checkpoint_state.notes),
             "supervisor_notes": checkpoint_state.notes,

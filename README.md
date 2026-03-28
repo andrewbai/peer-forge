@@ -101,7 +101,7 @@ Useful runtime flags:
 
 - `--agent-timeout-seconds 1800` sets a per-stage Claude/Codex timeout. Use `0` to disable it.
 - `--supervise` streams Claude/Codex output to the terminal and writes prefixed verbose logs without changing the protocol.
-- `--supervise-checkpoints` adds interactive stage-boundary checkpoints on top of `--supervise`. It supports `continue`, `inspect`, `note`, and `abort`, and requires `--task` or `--task-file`.
+- `--supervise-checkpoints` adds interactive stage-boundary checkpoints on top of `--supervise`. It supports `continue`, `inspect`, `retry`, `note`, and `abort`, and requires `--task` or `--task-file`.
 - `--cleanup-workspaces` removes the temporary isolated workspaces after the run.
 - `--keep-workspaces` keeps those isolated workspaces even when cleanup is enabled. `--keep-run-dir` remains as a deprecated alias.
 
@@ -170,11 +170,13 @@ That directory includes:
 - `progress.log`
 - `supervisor.log` when `--supervise` is enabled
 - `checkpoints/history.jsonl` when `--supervise-checkpoints` is enabled
+- per-checkpoint retry records such as `checkpoints/01-plan-initial-retry-01.json`
 - `notes/history.jsonl` when supervisor notes are added
 - isolated workspaces
 - prompts
 - model outputs
 - per-stage diff packages
+- per-stage retry artifacts under `<stage-dir>/retries/`
 - final plan
 - implementation review results
 - `report.json`
@@ -186,12 +188,13 @@ Runtime behavior:
 - The same progress lines are also written to `progress.log` inside the run directory.
 - With `--supervise`, Claude/Codex stdout and stderr are streamed live to the terminal with prefixes and mirrored into a run-level `supervisor.log`.
 - With `--supervise`, each stage also gets a prefixed `<stage-dir>/verbose.log` alongside the raw `stdout.txt` and `stderr.txt`.
-- With `--supervise-checkpoints`, the run pauses after each major stage boundary. You can `continue`, `inspect`, `note`, or `abort` without changing the agent protocol or workspace isolation.
-- `note` records a symmetric supervisor note that is injected into both agents' later prompts. Multi-line note entry ends with a line containing only `---`.
-- `inspect` prints the current stage artifact paths, active supervisor notes, `parsed.json`, `stdout.txt`, `stderr.txt`, `verbose.log` when present, and diff package paths for write stages.
+- With `--supervise-checkpoints`, the run pauses after each major stage boundary. You can `continue`, `inspect`, `retry`, `note`, or `abort` without changing the agent protocol or workspace isolation.
+- `retry` reruns the current checkpoint stage safely. Parallel plan checkpoints retry both agents together. Write stages restore their stage-entry snapshot before each retry. `apply-final` remains inspect/continue/abort only.
+- `note` records a symmetric supervisor note that is injected into both agents' later prompts. Multi-line note entry ends with a line containing only `---`. Notes added at a checkpoint do not affect retries of that same checkpoint.
+- `inspect` prints the current stage artifact paths, active supervisor notes, retry attempt summaries, `parsed.json`, `stdout.txt`, `stderr.txt`, `verbose.log` when present, and diff package paths for write stages.
 - Final machine-readable output stays on `stdout` as JSON.
 - `report.json` and `report.md` are written for completed, aborted, and failed runs.
-- `report.json` includes `progress_log`, `supervisor_log`, `checkpoint_history`, `checkpoint_events`, `notes_history`, `supervisor_notes`, and structured `stage_timings` entries for each Claude/Codex stage.
+- `report.json` includes `progress_log`, `supervisor_log`, `checkpoint_history`, `checkpoint_events`, `retry_attempts`, `notes_history`, `supervisor_notes`, and structured `stage_timings` entries for each Claude/Codex stage.
 
 ## Skills
 
