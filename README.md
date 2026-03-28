@@ -14,7 +14,7 @@ Standalone toolkit for running a dual-agent coding workflow with Claude Code and
 
 This repo is designed to install cleanly as a Claude Code skill pack while still exposing a direct CLI launcher.
 
-Current version: `v0.7.0`
+Current version: `v0.8.0`
 
 ## Structure
 

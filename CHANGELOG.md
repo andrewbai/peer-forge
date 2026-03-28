@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.8.0 - 2026-03-28
+
+Runtime observability and failure reporting.
+
+- Added live progress logging with phase boundaries and per-stage status output on `stderr`.
+- Added `--agent-timeout-seconds` so Claude and Codex stages do not hang forever by default.
+- Added failure-mode `report.json` and `report.md` generation plus `failure-traceback.txt`.
+- Renamed `--keep-run-dir` to `--keep-workspaces` and kept the old flag as a deprecated alias.
+- Added persisted `progress.log` output and structured `stage_timings` entries in `report.json`.
+- Updated the English and Chinese docs for runtime flags, artifacts, and exit codes.
+
 ## v0.7.0 - 2026-03-28
 
 Script-backed upgrade flow.

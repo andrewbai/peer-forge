@@ -31,40 +31,45 @@ Suggested short pitch:
 
 Release tag:
 
-- `v0.7.0`
+- `v0.8.0`
 
 Suggested release title:
 
-- `v0.7.0: Script-backed upgrade flow`
+- `v0.8.0: Runtime observability and failure reporting`
 
 Suggested release notes (English):
 
 ````md
 ## Highlights
 
-- Added `bin/peer-forge-upgrade` as the real upgrade engine behind the self-upgrade skill.
-- Switched `/peer-forge-upgrade` to call the packaged script instead of embedding raw git commands in the skill doc.
-- Added `--check` mode so users can see whether an update is available without modifying the checkout.
-- Updated `setup` to validate and advertise the new upgrade launcher alongside the existing CLI entrypoints.
+- Added live progress logging with phase boundaries and per-stage status output on `stderr`.
+- Added `--agent-timeout-seconds` so Claude and Codex stages do not hang forever by default.
+- Added failure-mode `report.json` and `report.md` generation plus `failure-traceback.txt`.
+- Renamed `--keep-run-dir` to `--keep-workspaces` and kept the old flag as a deprecated alias.
+- Added persisted `progress.log` output and structured `stage_timings` entries in `report.json`.
 
-## Upgrade
+## Highlights
 
-Global install:
+Artifacts now include:
 
 ```bash
-~/.claude/skills/peer-forge/bin/peer-forge-upgrade
+<target-repo>/.claude/tmp/peer-consensus/<run-id>/progress.log
 ```
 
-Check without upgrading:
+Structured timing data is now available in `report.json`:
 
-```bash
-~/.claude/skills/peer-forge/bin/peer-forge-upgrade --check
-```
-
-Project-local vendored install:
-
-```bash
-./.claude/skills/peer-forge/bin/peer-forge-upgrade
+```json
+{
+  "progress_log": ".../progress.log",
+  "stage_timings": [
+    {
+      "phase": "plan-initial",
+      "agent": "claude",
+      "status": "completed",
+      "duration_seconds": 3.12
+    }
+  ]
+}
 ```
 ````
 
@@ -73,29 +78,34 @@ Suggested release notes (中文):
 ````md
 ## 亮点
 
-- 新增 `bin/peer-forge-upgrade`，作为自升级能力的真实执行入口。
-- `/peer-forge-upgrade` 现在改为调用仓库自带脚本，不再在 skill 文档里直接写裸 `git` 命令。
-- 新增 `--check` 模式，可以只检查是否有新版本，而不修改当前 checkout。
-- `setup` 现在会校验并展示新的升级 CLI 入口。
+- 新增实时进度日志，终端可以看到分阶段进度、每个 stage 的开始、完成和失败状态。
+- 新增 `--agent-timeout-seconds`，避免 Claude / Codex 某个阶段无限卡住。
+- 新增失败态 `report.json`、`report.md` 和 `failure-traceback.txt`。
+- 将 `--keep-run-dir` 更名为 `--keep-workspaces`，同时保留旧参数作为废弃别名。
+- 新增持久化的 `progress.log` 和 `report.json` 里的结构化 `stage_timings` 阶段耗时信息。
 
-## 升级方式
+## 亮点
 
-全局安装：
+现在运行产物里会包含：
 
 ```bash
-~/.claude/skills/peer-forge/bin/peer-forge-upgrade
+<target-repo>/.claude/tmp/peer-consensus/<run-id>/progress.log
 ```
 
-仅检查更新：
+`report.json` 里现在也会有结构化的耗时信息：
 
-```bash
-~/.claude/skills/peer-forge/bin/peer-forge-upgrade --check
-```
-
-项目内 vendored 安装：
-
-```bash
-./.claude/skills/peer-forge/bin/peer-forge-upgrade
+```json
+{
+  "progress_log": ".../progress.log",
+  "stage_timings": [
+    {
+      "phase": "plan-initial",
+      "agent": "claude",
+      "status": "completed",
+      "duration_seconds": 3.12
+    }
+  ]
+}
 ```
 ````
 
