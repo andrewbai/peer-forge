@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.3.0 - 2026-03-28
+
+CLI cleanup and plan-stage optimization.
+
+- Renamed the public round-control flag to `--review-rounds` and kept `--signoff-rounds` as a deprecated alias.
+- Removed the duplicate `peer-consensus` heading from the Chinese README.
+- Skipped empty diff/package collection for read-only plan and review stages.
+
 ## v0.2.0 - 2026-03-28
 
 Workflow redesign and skill-first simplification.

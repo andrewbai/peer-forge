@@ -257,10 +257,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--claude-model", help="Claude model override.")
     parser.add_argument("--codex-model", help="Codex model override.")
     parser.add_argument(
+        "--review-rounds",
         "--signoff-rounds",
+        dest="review_rounds",
         type=int,
         default=1,
-        help="Maximum additional execute-fix-review rounds after the first implementation review. Default: 1.",
+        help="Maximum additional execute-fix-review rounds after the first implementation review. Default: 1. `--signoff-rounds` is a deprecated alias.",
     )
     parser.add_argument(
         "--apply-final",
@@ -287,6 +289,8 @@ def parse_args() -> argparse.Namespace:
         help="Disable Claude bare mode. Bare mode is enabled by default to reduce prompt contamination.",
     )
     args = parser.parse_args()
+    if "--signoff-rounds" in sys.argv:
+        print("Warning: --signoff-rounds is deprecated; use --review-rounds.", file=sys.stderr)
     return args
 
 
@@ -605,6 +609,21 @@ def collect_package(workspace: Path, baseline: Path, package_dir: Path, git_mode
         },
     )
     return changed, diff_path
+
+
+def create_empty_package(package_dir: Path) -> tuple[list[str], Path]:
+    package_dir.mkdir(parents=True, exist_ok=True)
+    diff_path = package_dir / "solution.diff"
+    write_text(diff_path, "")
+    write_json(
+        package_dir / "manifest.json",
+        {
+            "changed_files": [],
+            "copied_files": [],
+            "deleted_files": [],
+        },
+    )
+    return [], diff_path
 
 
 def prompt_header(task: str, acceptance: list[str], scope: list[str]) -> str:
@@ -1051,7 +1070,10 @@ def run_agent_stage(
     if read_only:
         assert_workspace_unchanged(before_status, before_diff, workspace, git_mode, agent, phase)
     package_dir = stage_dir / "package"
-    changed_files, diff_path = collect_package(workspace, baseline, package_dir, git_mode)
+    if read_only:
+        changed_files, diff_path = create_empty_package(package_dir)
+    else:
+        changed_files, diff_path = collect_package(workspace, baseline, package_dir, git_mode)
     return StageRun(
         agent=agent,
         phase=phase,
@@ -1213,7 +1235,7 @@ def main() -> int:
             "include_path": args.include_path,
             "claude_model": args.claude_model,
             "codex_model": args.codex_model,
-            "signoff_rounds": args.signoff_rounds,
+            "review_rounds": args.review_rounds,
             "apply_final": args.apply_final,
         },
     )
@@ -1438,7 +1460,7 @@ def main() -> int:
         implementation_review: StageRun | None = None
         final_approved = False
 
-        for round_idx in range(args.signoff_rounds + 1):
+        for round_idx in range(args.review_rounds + 1):
             implementation_review = run_agent_stage(
                 **common_stage_kwargs,
                 agent="codex" if final_plan_base == "claude" else "claude",
@@ -1464,7 +1486,7 @@ def main() -> int:
                 final_approved = True
                 break
 
-            if round_idx >= args.signoff_rounds:
+            if round_idx >= args.review_rounds:
                 break
 
             current_execution = run_agent_stage(

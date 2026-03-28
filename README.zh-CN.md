@@ -14,7 +14,7 @@
 
 这个仓库的目标不是绑死在某一个项目里，而是作为一个独立工具仓库存在，之后按需同步到别的项目中使用。
 
-当前版本：`v0.2.0`
+当前版本：`v0.3.0`
 
 ## 目录结构
 
@@ -171,8 +171,6 @@ python3 tools/peer_consensus.py \
 - 需要初始阶段互不污染
 - 需要先做方案共识，再做执行与 review
 - 希望更明确地控制 `task / acceptance / scope`
-
-### `peer-consensus`
 
 ### `codex-collab`
 

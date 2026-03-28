@@ -14,7 +14,7 @@ Standalone toolkit for running a dual-agent coding workflow with Claude Code and
 
 This repo is meant to live on its own and be synced into future projects when needed.
 
-Current version: `v0.2.0`
+Current version: `v0.3.0`
 
 ## Structure
 
