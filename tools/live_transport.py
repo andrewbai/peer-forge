@@ -7,22 +7,22 @@ from live_state import prompt_file_message
 
 
 class LiveTransport(Protocol):
-    def send_prompt(self, agent: str, text: str) -> None:
+    async def send_prompt(self, agent: str, text: str) -> None:
         ...
 
-    def read_output_since(self, agent: str, offset: int) -> tuple[str, int]:
+    async def read_output_since(self, agent: str, offset: int) -> tuple[str, int]:
         ...
 
-    def capture_recent(self, agent: str, *, lines: int = 200) -> str:
+    async def capture_recent(self, agent: str, *, lines: int = 200) -> str:
         ...
 
     def describe_agent(self, agent: str) -> str:
         ...
 
-    def output_size(self, agent: str) -> int:
+    async def output_size(self, agent: str) -> int:
         ...
 
-    def shutdown(self) -> None:
+    async def shutdown(self) -> None:
         ...
 
 

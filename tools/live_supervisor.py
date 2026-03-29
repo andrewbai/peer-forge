@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 import select
@@ -192,11 +193,11 @@ class CliSupervisor:
             read_text_preview(path),
         ]
 
-    def inspect_agent(self, agent: str) -> list[str]:
+    async def inspect_agent(self, agent: str) -> list[str]:
         turn = current_turn(self.state)
         turn_agent = turn["agents"][agent]
         agent_state = self.state["agents"][agent]
-        pane_capture = self.transport.capture_recent(agent, lines=80)
+        pane_capture = await self.transport.capture_recent(agent, lines=80)
         lines = [
             f"Agent: {agent}",
             f"Runtime: {self.transport.describe_agent(agent) or agent_runtime_ref(self.state, agent)}",
@@ -225,7 +226,7 @@ class CliSupervisor:
         )
         return lines
 
-    def handle_command(
+    async def handle_command(
         self,
         *,
         mode: str,
@@ -265,7 +266,7 @@ class CliSupervisor:
             if agent_name not in AGENTS:
                 self.log("Usage: inspect claude|codex")
                 return None
-            self.emit_lines(self.inspect_agent(agent_name))
+            self.emit_lines(await self.inspect_agent(agent_name))
             return None
         if lower == "show final-plan":
             self.emit_lines(self.show_final_plan_lines())
@@ -284,7 +285,7 @@ class CliSupervisor:
                 self.log("No later phase remains, so no new symmetric note can be queued.")
                 return None
             inline_text = command[len("note both") :].strip()
-            note_text = self.read_note_text(inline_text)
+            note_text = await asyncio.to_thread(self.read_note_text, inline_text)
             if not note_text:
                 self.log("Empty note discarded.")
                 return None
@@ -308,16 +309,26 @@ class CliSupervisor:
         self.log(f"Unknown command: {command}")
         return None
 
-    def poll_running_command(self, *, timeout: float, next_phase: str | None) -> str | None:
+    def _poll_running_command_sync(self, *, timeout: float) -> str | None:
         ready, _, _ = select.select([self.input_stream], [], [], timeout)
         if not ready:
             return None
         raw_command = self.input_stream.readline()
         if raw_command == "":
             return None
-        return self.handle_command(mode="running", next_phase=next_phase, raw_command=raw_command)
+        return raw_command
 
-    def pause_for_boundary(self, *, label: str, next_phase: str | None) -> None:
+    async def poll_running_command(self, *, timeout: float, next_phase: str | None) -> str | None:
+        raw_command = await asyncio.to_thread(self._poll_running_command_sync, timeout=timeout)
+        if raw_command is None:
+            return None
+        return await self.handle_command(mode="running", next_phase=next_phase, raw_command=raw_command)
+
+    def _read_boundary_command_sync(self) -> str:
+        print("> ", end="", file=self.output_stream, flush=True)
+        return self.input_stream.readline()
+
+    async def pause_for_boundary(self, *, label: str, next_phase: str | None) -> None:
         self.log(label)
         if next_phase is None:
             self.log("No later phase remains.")
@@ -327,11 +338,10 @@ class CliSupervisor:
             "Boundary commands: continue, status, tail claude, tail codex, inspect claude, inspect codex, show final-plan, show package, show diff, show manifest, note both, abort",
         )
         while True:
-            print("> ", end="", file=self.output_stream, flush=True)
-            raw_command = self.input_stream.readline()
+            raw_command = await asyncio.to_thread(self._read_boundary_command_sync)
             if raw_command == "":
                 continue
-            action = self.handle_command(mode="boundary", next_phase=next_phase, raw_command=raw_command)
+            action = await self.handle_command(mode="boundary", next_phase=next_phase, raw_command=raw_command)
             if action == "continue":
                 return
             if action == "abort":

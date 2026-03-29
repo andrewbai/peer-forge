@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -40,8 +41,8 @@ class TmuxTransport:
     def kill_session(self, session_name: str) -> None:
         kill_session(session_name)
 
-    def send_prompt(self, agent: str, text: str) -> None:
-        paste_message(self.state["agents"][agent]["pane_id"], text)
+    async def send_prompt(self, agent: str, text: str) -> None:
+        await asyncio.to_thread(paste_message, self.state["agents"][agent]["pane_id"], text)
 
     def _refresh_stream(self, agent: str) -> None:
         agent_state = self.state["agents"][agent]
@@ -50,25 +51,31 @@ class TmuxTransport:
         if data:
             record_agent_output(self.state, agent, data.decode("utf-8", errors="replace"))
 
-    def read_output_since(self, agent: str, offset: int) -> tuple[str, int]:
+    def _read_output_since_sync(self, agent: str, offset: int) -> tuple[str, int]:
         self._refresh_stream(agent)
         data, new_offset = read_bytes_from(raw_log_path(self.state, agent), offset)
         if not data:
             return "", new_offset
         return sanitize_terminal_text(data.decode("utf-8", errors="replace")), new_offset
 
-    def capture_recent(self, agent: str, *, lines: int = 200) -> str:
-        return capture_pane(self.state["agents"][agent]["pane_id"], lines=lines)
+    async def read_output_since(self, agent: str, offset: int) -> tuple[str, int]:
+        return await asyncio.to_thread(self._read_output_since_sync, agent, offset)
+
+    async def capture_recent(self, agent: str, *, lines: int = 200) -> str:
+        return await asyncio.to_thread(capture_pane, self.state["agents"][agent]["pane_id"], lines=lines)
 
     def describe_agent(self, agent: str) -> str:
         pane_id = str(self.state["agents"][agent].get("pane_id", "") or "")
         return pane_id or "pane=missing"
 
-    def output_size(self, agent: str) -> int:
+    def _output_size_sync(self, agent: str) -> int:
         path = raw_log_path(self.state, agent)
         return path.stat().st_size if path.exists() else 0
 
-    def shutdown(self) -> None:
+    async def output_size(self, agent: str) -> int:
+        return await asyncio.to_thread(self._output_size_sync, agent)
+
+    async def shutdown(self) -> None:
         return
 
     def respawn(self, pane_id: str, *, cwd: Path, command: list[str]) -> None:

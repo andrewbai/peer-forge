@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import asyncio
 import argparse
 import json
 from pathlib import Path
@@ -202,7 +203,7 @@ def start_mode(args: argparse.Namespace) -> int:
     run_dir = run_root / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
     if args.transport == "pty" and args.no_attach:
-        raise SystemExit("--no-attach is not supported with --transport pty in P2.1.")
+        raise SystemExit("--no-attach is not supported with --transport pty yet.")
     session_name = args.session_name or (
         f"peer-forge-live-{run_id[-8:]}" if args.transport == "tmux" else f"peer-forge-live-local-{run_id[-8:]}"
     )
@@ -257,7 +258,7 @@ def start_mode(args: argparse.Namespace) -> int:
             state["agents"]["supervisor"]["pane_id"] = panes["supervisor"]
             save_state(state)
 
-            runloop.dispatch_turn(initial_turn, send_prompts=False)
+            asyncio.run(runloop.dispatch_turn(initial_turn, send_prompts=False))
             transport.respawn(
                 panes["claude"],
                 cwd=workspaces.claude,
@@ -300,7 +301,7 @@ def start_mode(args: argparse.Namespace) -> int:
         return 0
 
     try:
-        runloop.dispatch_turn(initial_turn, send_prompts=False)
+        asyncio.run(runloop.dispatch_turn(initial_turn, send_prompts=False))
         transport.start_agent(
             "claude",
             cwd=workspaces.claude,
@@ -322,7 +323,7 @@ def start_mode(args: argparse.Namespace) -> int:
         save_state(state)
         supervisor_log_line(state, f"Supervisor running inline for {state['run_id']} using pty transport.")
         supervisor_log_line(state, "This is the live peer-forge protocol with plan, execution, review, and signoff phases.")
-        runloop.serve()
+        asyncio.run(runloop.serve())
         return 0
     except KeyboardInterrupt as exc:
         state["status"] = "aborted"
@@ -342,7 +343,7 @@ def start_mode(args: argparse.Namespace) -> int:
         supervisor_log_line(state, f"Live run failed: {type(exc).__name__}: {exc}")
         return 1
     finally:
-        transport.shutdown()
+        asyncio.run(transport.shutdown())
 
 
 def resume_mode(args: argparse.Namespace) -> int:
@@ -677,7 +678,7 @@ def serve_mode(args: argparse.Namespace) -> int:
     supervisor_log_line(state, f"Supervisor attached to {state['run_id']} in session {state['session_name']}.")
     supervisor_log_line(state, "This is the live peer-forge protocol with plan, execution, review, and signoff phases.")
     try:
-        runloop.serve()
+        asyncio.run(runloop.serve())
         return 0
     except KeyboardInterrupt as exc:
         state["status"] = "aborted"

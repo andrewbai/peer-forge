@@ -428,7 +428,7 @@ class RunLoop:
         self.supervisor = supervisor
         self.machine = machine
 
-    def dispatch_turn(
+    async def dispatch_turn(
         self,
         turn: dict[str, Any],
         *,
@@ -442,12 +442,12 @@ class RunLoop:
                 continue
             turn_agent["status"] = "running"
             if send_prompts:
-                turn_agent["turn_start_offset"] = self.transport.output_size(agent)
+                turn_agent["turn_start_offset"] = await self.transport.output_size(agent)
             turn_agent["parse_error"] = ""
             turn_agent["result"] = None
             capture_read_only_snapshot(self.state, turn, agent)
             if send_prompts:
-                self.transport.send_prompt(agent, prompt_file_message(Path(turn_agent["session_prompt_path"])))
+                await self.transport.send_prompt(agent, prompt_file_message(Path(turn_agent["session_prompt_path"])))
         save_state(self.state)
         write_supervisor_event(
             self.state,
@@ -460,7 +460,7 @@ class RunLoop:
             },
         )
 
-    def wait_for_turn(
+    async def wait_for_turn(
         self,
         turn: dict[str, Any],
         *,
@@ -478,7 +478,7 @@ class RunLoop:
                 turn_agent = turn["agents"][agent]
                 if not turn_agent["active"] or turn_agent["status"] == "completed":
                     continue
-                text, offsets[agent] = self.transport.read_output_since(agent, offsets[agent])
+                text, offsets[agent] = await self.transport.read_output_since(agent, offsets[agent])
                 if text:
                     buffers[agent] += text
                     append_text(Path(turn_agent["turn_log_path"]), text)
@@ -522,7 +522,7 @@ class RunLoop:
                 nudge_text = build_watchdog_nudge(turn["id"], turn["phase"])
                 for agent in AGENTS:
                     if turn["agents"][agent]["active"] and turn["agents"][agent]["status"] != "completed":
-                        self.transport.send_prompt(agent, nudge_text)
+                        await self.transport.send_prompt(agent, nudge_text)
                         turn["agents"][agent]["nudge_count"] += 1
                 turn["watchdog_nudges"] += 1
                 last_output_time = time.time()
@@ -530,11 +530,11 @@ class RunLoop:
                 self.supervisor.log(
                     f"Watchdog nudge sent symmetrically to active agents for {turn['id']}.",
                 )
-            action = self.supervisor.poll_running_command(timeout=0.5, next_phase=next_phase)
+            action = await self.supervisor.poll_running_command(timeout=0.5, next_phase=next_phase)
             if action == "abort":
                 raise KeyboardInterrupt("Supervisor aborted the live run.")
 
-    def ensure_turn_results(
+    async def ensure_turn_results(
         self,
         *,
         phase: str,
@@ -545,58 +545,58 @@ class RunLoop:
         turn = find_turn(self.state, phase)
         if turn is None:
             turn = build_turn()
-            self.dispatch_turn(turn, send_prompts=send_prompts)
-            return self.wait_for_turn(turn, next_phase=next_phase)
+            await self.dispatch_turn(turn, send_prompts=send_prompts)
+            return await self.wait_for_turn(turn, next_phase=next_phase)
         if turn["status"] == "completed":
             return turn_results(turn)
         if turn["status"] == "pending":
-            self.dispatch_turn(turn, send_prompts=send_prompts)
-            return self.wait_for_turn(turn, next_phase=next_phase)
+            await self.dispatch_turn(turn, send_prompts=send_prompts)
+            return await self.wait_for_turn(turn, next_phase=next_phase)
         if turn["status"] == "running":
             supervisor_log_line(self.state, f"Resuming active turn {turn['id']} ({turn['summary']}).")
-            return self.wait_for_turn(turn, next_phase=next_phase)
+            return await self.wait_for_turn(turn, next_phase=next_phase)
         raise RuntimeError(f"Turn {turn['id']} is in unsupported state {turn['status']!r}.")
 
-    def maybe_pause_boundary(self, *, phase: str, label: str, next_phase: str | None) -> None:
+    async def maybe_pause_boundary(self, *, phase: str, label: str, next_phase: str | None) -> None:
         if boundary_pending(self.state, phase):
-            self.supervisor.pause_for_boundary(label=label, next_phase=next_phase)
+            await self.supervisor.pause_for_boundary(label=label, next_phase=next_phase)
 
-    def serve(self) -> None:
-        plan_initial = self.ensure_turn_results(
+    async def serve(self) -> None:
+        plan_initial = await self.ensure_turn_results(
             phase="plan-initial",
             next_phase="plan-review",
             build_turn=self.machine.create_initial_turn,
             send_prompts=False,
         )
-        self.maybe_pause_boundary(phase="plan-initial", label="Initial plans complete.", next_phase="plan-review")
+        await self.maybe_pause_boundary(phase="plan-initial", label="Initial plans complete.", next_phase="plan-review")
 
-        plan_reviews = self.ensure_turn_results(
+        plan_reviews = await self.ensure_turn_results(
             phase="plan-review",
             next_phase="plan-revise",
             build_turn=lambda: self.machine.build_plan_review_turn(plan_initial),
         )
-        self.maybe_pause_boundary(phase="plan-review", label="Cross-review complete.", next_phase="plan-revise")
+        await self.maybe_pause_boundary(phase="plan-review", label="Cross-review complete.", next_phase="plan-revise")
 
-        plan_revisions = self.ensure_turn_results(
+        plan_revisions = await self.ensure_turn_results(
             phase="plan-revise",
             next_phase="plan-consensus",
             build_turn=lambda: self.machine.build_plan_revise_turn(plan_reviews),
         )
-        self.maybe_pause_boundary(phase="plan-revise", label="Revision complete.", next_phase="plan-consensus")
+        await self.maybe_pause_boundary(phase="plan-revise", label="Revision complete.", next_phase="plan-consensus")
 
-        plan_consensus = self.ensure_turn_results(
+        plan_consensus = await self.ensure_turn_results(
             phase="plan-consensus",
             next_phase="plan-finalize",
             build_turn=lambda: self.machine.build_plan_consensus_turn(plan_revisions),
         )
         final_plan_base, merge_brief = ensure_plan_merge_brief(self.state, plan_consensus)
-        self.maybe_pause_boundary(
+        await self.maybe_pause_boundary(
             phase="plan-consensus",
             label=f"Consensus complete. Base side: {final_plan_base}.",
             next_phase="plan-finalize",
         )
 
-        finalize_result = self.ensure_turn_results(
+        finalize_result = await self.ensure_turn_results(
             phase="plan-finalize",
             next_phase="plan-signoff",
             build_turn=lambda: self.machine.build_plan_finalize_turn(
@@ -607,7 +607,11 @@ class RunLoop:
         )
         current_final = self.state.get("final_plan") or finalize_result[final_plan_base]
         persist_final_candidate(self.state, current_final)
-        self.maybe_pause_boundary(phase="plan-finalize", label="Final plan candidate drafted.", next_phase="plan-signoff")
+        await self.maybe_pause_boundary(
+            phase="plan-finalize",
+            label="Final plan candidate drafted.",
+            next_phase="plan-signoff",
+        )
 
         signoff_round_index = 0
         final_approved = False
@@ -619,7 +623,7 @@ class RunLoop:
             next_phase = None
             if signoff_round_index < self.state["signoff_rounds"]:
                 next_phase = f"plan-final-fix-round-{signoff_round_index + 1}"
-            signoffs = self.ensure_turn_results(
+            signoffs = await self.ensure_turn_results(
                 phase=signoff_phase,
                 next_phase=next_phase,
                 build_turn=lambda signoff_round_index=signoff_round_index, current_final=current_final: self.machine.build_plan_signoff_turn(
@@ -634,13 +638,13 @@ class RunLoop:
             if signoff_round_index >= self.state["signoff_rounds"]:
                 break
             fix_round = signoff_round_index + 1
-            self.maybe_pause_boundary(
+            await self.maybe_pause_boundary(
                 phase=signoff_phase,
                 label=f"Signoff round {fix_round} found objections.",
                 next_phase=f"plan-final-fix-round-{fix_round}",
             )
             fix_phase = f"plan-final-fix-round-{fix_round}"
-            fixed = self.ensure_turn_results(
+            fixed = await self.ensure_turn_results(
                 phase=fix_phase,
                 next_phase=f"plan-signoff-round-{fix_round}",
                 build_turn=lambda fix_round=fix_round, current_final=current_final, signoffs=signoffs: self.machine.build_final_fix_turn(
@@ -652,7 +656,7 @@ class RunLoop:
             )
             current_final = fixed[final_plan_base]
             persist_final_candidate(self.state, current_final)
-            self.maybe_pause_boundary(
+            await self.maybe_pause_boundary(
                 phase=fix_phase,
                 label=f"Final-fix round {fix_round} complete.",
                 next_phase=f"plan-signoff-round-{fix_round}",
@@ -679,13 +683,13 @@ class RunLoop:
         self.state["selected_executor"] = executor
         self.state["selected_reviewer"] = reviewer
         save_state(self.state)
-        self.maybe_pause_boundary(
+        await self.maybe_pause_boundary(
             phase=last_plan_signoff_phase,
             label=f"Plan approved. Executor: {executor}. Reviewer: {reviewer}.",
             next_phase="execute-initial",
         )
 
-        execute_result = self.ensure_turn_results(
+        execute_result = await self.ensure_turn_results(
             phase="execute-initial",
             next_phase="execution-review",
             build_turn=lambda: self.machine.build_execute_turn(executor=executor, final_plan=current_final),
@@ -704,12 +708,16 @@ class RunLoop:
         self.state["summary"]["execution_signoffs"] = self.state["summary"].get("execution_signoffs", {})
         self.state["summary"]["current_execution"] = current_execution
         save_state(self.state)
-        self.maybe_pause_boundary(phase="execute-initial", label="Initial execution complete.", next_phase="execution-review")
+        await self.maybe_pause_boundary(
+            phase="execute-initial",
+            label="Initial execution complete.",
+            next_phase="execution-review",
+        )
 
         review_next_phase = "execution-signoff"
         if self.state["signoff_rounds"] > 0:
             review_next_phase = "execution-fix-round-1"
-        execution_review_result = self.ensure_turn_results(
+        execution_review_results = await self.ensure_turn_results(
             phase="execution-review",
             next_phase=review_next_phase,
             build_turn=lambda: self.machine.build_execution_review_turn(
@@ -719,7 +727,8 @@ class RunLoop:
                 execution_summary=current_execution,
                 execution_package=current_execution_package,
             ),
-        )[reviewer]
+        )
+        execution_review_result = execution_review_results[reviewer]
         self.state["summary"]["execution_review"] = execution_review_result
         self.state["summary"]["current_execution"] = current_execution
         save_state(self.state)
@@ -730,7 +739,7 @@ class RunLoop:
         execution_fix_round = 0
 
         if execution_review_result["overall_verdict"] == "approve":
-            self.maybe_pause_boundary(
+            await self.maybe_pause_boundary(
                 phase="execution-review",
                 label="Implementation review approved. Proceeding to implementation signoff.",
                 next_phase="execution-signoff",
@@ -748,7 +757,7 @@ class RunLoop:
                 return
             execution_fix_round = 1
             pending_fix_feedback = execution_review_result
-            self.maybe_pause_boundary(
+            await self.maybe_pause_boundary(
                 phase="execution-review",
                 label="Implementation review requested changes.",
                 next_phase="execution-fix-round-1",
@@ -757,7 +766,7 @@ class RunLoop:
         while True:
             if execution_fix_round > 0:
                 fix_phase = f"execution-fix-round-{execution_fix_round}"
-                fix_result = self.ensure_turn_results(
+                fix_result = await self.ensure_turn_results(
                     phase=fix_phase,
                     next_phase=f"execution-signoff-round-{execution_fix_round}",
                     build_turn=lambda execution_fix_round=execution_fix_round, pending_fix_feedback=pending_fix_feedback: self.machine.build_execution_fix_turn(
@@ -779,7 +788,7 @@ class RunLoop:
                 )
                 self.state["summary"]["current_execution"] = current_execution
                 save_state(self.state)
-                self.maybe_pause_boundary(
+                await self.maybe_pause_boundary(
                     phase=fix_phase,
                     label=f"Execution fix round {execution_fix_round} complete.",
                     next_phase=f"execution-signoff-round-{execution_fix_round}",
@@ -789,7 +798,7 @@ class RunLoop:
             next_phase = None
             if execution_fix_round < self.state["signoff_rounds"]:
                 next_phase = f"execution-fix-round-{execution_fix_round + 1}"
-            current_execution_signoffs = self.ensure_turn_results(
+            current_execution_signoffs = await self.ensure_turn_results(
                 phase=signoff_phase,
                 next_phase=next_phase,
                 build_turn=lambda execution_fix_round=execution_fix_round, current_execution=current_execution, current_execution_package=current_execution_package: self.machine.build_execution_signoff_turn(
@@ -806,7 +815,7 @@ class RunLoop:
                 break
             pending_fix_feedback = summarize_signoff_objections(current_execution_signoffs)
             next_fix_round = execution_fix_round + 1
-            self.maybe_pause_boundary(
+            await self.maybe_pause_boundary(
                 phase=signoff_phase,
                 label=f"Implementation signoff round {execution_fix_round + 1} found objections.",
                 next_phase=f"execution-fix-round-{next_fix_round}",
