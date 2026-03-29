@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Peer Forge Live Console</title>
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body>
+    <script>
+      window.__PEER_FORGE_LIVE_BOOTSTRAP__ = __PEER_FORGE_LIVE_BOOTSTRAP_JSON__;
+    </script>
+    <div class="shell">
+      <header class="masthead">
+        <div class="masthead-copy">
+          <p class="kicker">Peer Forge Live Console</p>
+          <h1>Single-Run Supervision</h1>
+          <p class="subtitle">
+            Live run dashboard, event stream, artifacts, and boundary controls in one local console.
+          </p>
+        </div>
+        <div class="status-strip">
+          <span class="pill connection-pill" data-connection-pill>Connecting</span>
+          <span class="pill status-pill" data-run-status-pill>Unknown</span>
+        </div>
+      </header>
+
+      <section class="overview-card">
+        <div class="overview-grid">
+          <div class="metric">
+            <span class="metric-label">Run</span>
+            <span class="metric-value" data-run-id>n/a</span>
+          </div>
+          <div class="metric">
+            <span class="metric-label">Phase</span>
+            <span class="metric-value" data-current-phase>n/a</span>
+          </div>
+          <div class="metric">
+            <span class="metric-label">Session</span>
+            <span class="metric-value" data-session-name>n/a</span>
+          </div>
+          <div class="metric">
+            <span class="metric-label">Transport</span>
+            <span class="metric-value" data-transport>n/a</span>
+          </div>
+          <div class="metric">
+            <span class="metric-label">Executor</span>
+            <span class="metric-value" data-selected-executor>n/a</span>
+          </div>
+          <div class="metric">
+            <span class="metric-label">Reviewer</span>
+            <span class="metric-value" data-selected-reviewer>n/a</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="boundary-banner is-hidden" data-boundary-banner>
+        <div>
+          <p class="boundary-kicker">Boundary Pending</p>
+          <h2 data-boundary-label>n/a</h2>
+          <p data-boundary-next-phase>Next phase: n/a</p>
+        </div>
+        <div class="boundary-meta">
+          <span class="mini-label">Allowed Commands</span>
+          <div class="command-chip-list" data-boundary-commands></div>
+        </div>
+      </section>
+
+      <section class="flash-banner is-hidden" data-flash-banner></section>
+
+      <div class="layout">
+        <aside class="panel timeline-panel">
+          <div class="panel-header">
+            <p class="panel-kicker">Timeline</p>
+            <h2>Turns</h2>
+          </div>
+          <ol class="turn-list" data-turn-list></ol>
+        </aside>
+
+        <main class="main-column">
+          <section class="panel command-panel">
+            <div class="panel-header">
+              <p class="panel-kicker">Control</p>
+              <h2>Supervisor Commands</h2>
+            </div>
+            <div class="button-row">
+              <button type="button" class="action-button" data-status-command>Status</button>
+              <button type="button" class="action-button accent-button" data-continue-command>Continue</button>
+              <button type="button" class="action-button danger-button" data-abort-command>Abort</button>
+            </div>
+            <form class="note-form" data-note-form>
+              <label class="note-label" for="note-input">Queue Symmetric Note</label>
+              <textarea
+                id="note-input"
+                class="note-input"
+                data-note-input
+                rows="3"
+                placeholder="Write the note that should apply from the next phase onward."
+              ></textarea>
+              <div class="note-actions">
+                <span class="note-hint">The note will become `note both &lt;text&gt;`.</span>
+                <button type="submit" class="action-button secondary-button" data-note-submit>Queue Note</button>
+              </div>
+            </form>
+          </section>
+
+          <section class="panel artifact-panel">
+            <div class="panel-header">
+              <p class="panel-kicker">Artifacts</p>
+              <h2>Current Outputs</h2>
+            </div>
+            <div class="artifact-tabs">
+              <button type="button" class="artifact-tab" data-artifact-tab="finalPlan">Final Plan</button>
+              <button type="button" class="artifact-tab" data-artifact-tab="currentPackage">Package</button>
+              <button type="button" class="artifact-tab" data-artifact-tab="currentDiff">Diff</button>
+            </div>
+            <pre class="artifact-content" data-artifact-content></pre>
+          </section>
+
+          <section class="panel events-panel">
+            <div class="panel-header">
+              <p class="panel-kicker">Events</p>
+              <h2>Run Activity</h2>
+            </div>
+            <div class="event-feed" data-event-feed></div>
+          </section>
+        </main>
+
+        <aside class="panel agents-panel">
+          <div class="panel-header">
+            <p class="panel-kicker">Agents</p>
+            <h2>Live Views</h2>
+          </div>
+          <section class="agent-card" data-agent-card="claude">
+            <div class="agent-head">
+              <h3>Claude</h3>
+              <span class="pill agent-pill" data-agent-status="claude">idle</span>
+            </div>
+            <dl class="agent-meta" data-agent-meta="claude"></dl>
+            <pre class="agent-tail" data-agent-tail="claude"></pre>
+          </section>
+          <section class="agent-card" data-agent-card="codex">
+            <div class="agent-head">
+              <h3>Codex</h3>
+              <span class="pill agent-pill" data-agent-status="codex">idle</span>
+            </div>
+            <dl class="agent-meta" data-agent-meta="codex"></dl>
+            <pre class="agent-tail" data-agent-tail="codex"></pre>
+          </section>
+        </aside>
+      </div>
+    </div>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

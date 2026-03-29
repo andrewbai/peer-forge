@@ -64,6 +64,18 @@ class _ControlRequestHandler(BaseHTTPRequestHandler):
 
 
 class LiveControlServer:
+    STATIC_ROUTES = {
+        "/app.css": "app.css",
+        "/app.js": "app.js",
+        "/render.js": "render.js",
+        "/store.js": "store.js",
+    }
+    CONTENT_TYPES = {
+        ".css": "text/css; charset=utf-8",
+        ".html": "text/html; charset=utf-8",
+        ".js": "text/javascript; charset=utf-8",
+    }
+
     def __init__(self, state: dict[str, Any], supervisor: Any) -> None:
         self.state = state
         self.supervisor = supervisor
@@ -83,6 +95,9 @@ class LiveControlServer:
 
     def _events_path(self) -> Path:
         return Path(self.state["logs"]["events_jsonl"])
+
+    def _web_root(self) -> Path:
+        return Path(__file__).resolve().parent.parent / "web" / "live"
 
     def start(self) -> None:
         if self._server is not None:
@@ -140,20 +155,61 @@ class LiveControlServer:
         self._server = None
         self._thread = None
 
-    def _authorized(self, handler: BaseHTTPRequestHandler) -> bool:
+    def _authorized(self, handler: BaseHTTPRequestHandler, *, params: dict[str, list[str]] | None = None) -> bool:
         token = self._token()
         if not token:
             return True
         header_value = handler.headers.get("X-Peer-Forge-Token", "")
-        return header_value == token
+        query_token = ""
+        if params:
+            query_token = str((params.get("token") or [""])[0] or "")
+        return header_value == token or query_token == token
 
     def _send_json(self, handler: BaseHTTPRequestHandler, status: HTTPStatus, payload: dict[str, Any]) -> None:
         data = json.dumps(payload, ensure_ascii=True, indent=2).encode("utf-8")
+        self._send_bytes(handler, status, data, content_type="application/json; charset=utf-8")
+
+    def _send_bytes(
+        self,
+        handler: BaseHTTPRequestHandler,
+        status: HTTPStatus,
+        data: bytes,
+        *,
+        content_type: str,
+    ) -> None:
         handler.send_response(status)
-        handler.send_header("Content-Type", "application/json; charset=utf-8")
+        handler.send_header("Content-Type", content_type)
         handler.send_header("Content-Length", str(len(data)))
         handler.end_headers()
         handler.wfile.write(data)
+
+    def _render_index_html(self) -> str:
+        template = (self._web_root() / "index.html").read_text(encoding="utf-8")
+        control = self._control_config()
+        bootstrap = {
+            "runId": self.state.get("run_id", ""),
+            "token": self._token(),
+            "baseUrl": str(control.get("base_url", "") or ""),
+            "eventsStreamUrl": str(control.get("events_stream_url", "") or ""),
+        }
+        return template.replace("__PEER_FORGE_LIVE_BOOTSTRAP_JSON__", json.dumps(bootstrap, ensure_ascii=True))
+
+    def _serve_static(self, handler: BaseHTTPRequestHandler, path: str) -> bool:
+        if path in {"/", "/index.html"}:
+            data = self._render_index_html().encode("utf-8")
+            self._send_bytes(handler, HTTPStatus.OK, data, content_type=self.CONTENT_TYPES[".html"])
+            return True
+        relative = self.STATIC_ROUTES.get(path)
+        if not relative:
+            return False
+        file_path = self._web_root() / relative
+        if not file_path.exists():
+            self._send_not_found(handler)
+            return True
+        suffix = file_path.suffix.lower()
+        content_type = self.CONTENT_TYPES.get(suffix, "application/octet-stream")
+        self._send_bytes(handler, HTTPStatus.OK, file_path.read_bytes(), content_type=content_type)
+        return True
 
     def _send_not_found(self, handler: BaseHTTPRequestHandler) -> None:
         self._send_json(
@@ -252,12 +308,14 @@ class LiveControlServer:
             return
 
     def handle_get(self, handler: BaseHTTPRequestHandler) -> None:
-        if not self._authorized(handler):
-            self._send_unauthorized(handler)
-            return
         parsed = urlparse(handler.path)
         path = parsed.path
         params = parse_qs(parsed.query)
+        if self._serve_static(handler, path):
+            return
+        if not self._authorized(handler, params=params):
+            self._send_unauthorized(handler)
+            return
 
         if path == "/health":
             snapshot = self._state_snapshot()
@@ -357,10 +415,11 @@ class LiveControlServer:
         self._send_not_found(handler)
 
     def handle_post(self, handler: BaseHTTPRequestHandler) -> None:
-        if not self._authorized(handler):
+        parsed = urlparse(handler.path)
+        params = parse_qs(parsed.query)
+        if not self._authorized(handler, params=params):
             self._send_unauthorized(handler)
             return
-        parsed = urlparse(handler.path)
         if parsed.path != "/commands":
             self._send_not_found(handler)
             return
