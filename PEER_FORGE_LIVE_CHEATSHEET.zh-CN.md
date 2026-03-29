@@ -174,7 +174,9 @@ apply 后自动 commit：
   --scope src/upload \
   --scope tests \
   --watchdog-seconds 180 \
-  --signoff-rounds 1
+  --signoff-rounds 1 \
+  --no-attach \
+  --open-ui
 ```
 
 ### 5.3 参数解释
@@ -207,14 +209,18 @@ apply 后自动 commit：
   - 自定义 tmux session 名称
 - `--no-attach`
   - 创建 session 但不自动 attach
-- `--no-claude-bare`
-  - 关闭 Claude bare mode
+- `--open-ui`
+  - control server 就绪后，尽力自动打开本地 Web UI
+- `--print-control-token`
+  - 显式输出本地 control API token，方便你用 `curl` / 脚本自己调 API
+- `--claude-bare`
+  - 显式开启 Claude bare mode；默认不启用，这样 Claude Max / OAuth / keychain 登录态可以继续用
 
 ---
 
 ## 6. 推荐的第一次真实运行方式
 
-第一次建议你不要直接 attach，而是先拿到 `state.json` 路径。
+第一次建议你不要直接 attach，而是先走 detached + 浏览器监督。
 
 ```bash
 ~/.claude/skills/peer-forge/bin/peer-forge-live \
@@ -222,7 +228,8 @@ apply 后自动 commit：
   --task "你的真实任务" \
   --acceptance "不要改 public API" \
   --scope src \
-  --no-attach
+  --no-attach \
+  --open-ui
 ```
 
 它会打印一段 JSON，里面通常有：
@@ -232,6 +239,26 @@ apply 后自动 commit：
 - `run_dir`
 - `state_file`
 - `attach`
+- `control_url`
+- `events_stream_url`
+- `web_url`
+
+如果你额外传了：
+
+```bash
+--print-control-token
+```
+
+还会多一个：
+
+- `control_token`
+
+推荐顺序是：
+
+1. 先看浏览器是否已经打开 `web_url`
+2. 在 Web UI 里看 timeline / events / artifacts / boundary controls
+3. 需要处理 Claude / Codex 原生确认时，再 attach 进 tmux
+4. 需要自己调本地 API 时，再用 `control_url` + `control_token`
 
 拿到之后：
 
@@ -242,7 +269,7 @@ tmux attach-session -t <session_name>
 这样有两个好处：
 
 1. 你知道准确的 `state.json` 路径
-2. 如果 supervisor pane 后面挂掉，恢复时不用再找路径
+2. 你同时拿到了浏览器监督入口和 tmux 恢复入口
 
 ---
 
@@ -266,9 +293,17 @@ tmux attach-session -t <session_name>
 - 是否都开始正常思考和输出
 - supervisor 是否在推进 turn
 
+正常监督时，更推荐你盯浏览器里的 Web UI：
+
+- timeline 看 turn 进度
+- events 看 run 事件流
+- artifacts 看 final plan / package / diff
+- boundary 时直接点 `Continue`
+- 需要加对称 note 时直接填 note 表单
+
 ---
 
-## 8. supervisor pane 能做什么
+## 8. supervisor pane / Web UI 能做什么
 
 当前支持的主要命令：
 
@@ -285,6 +320,13 @@ tmux attach-session -t <session_name>
 - `wait`
 - `continue`
 - `abort`
+
+浏览器里的操作和这些命令是一一对应的：
+
+- `Status` 按钮对应 `status`
+- `Continue` 按钮对应 `continue`
+- `Abort` 按钮对应 `abort`
+- note 表单会排队成 `note both <text>`
 
 下面是每个命令的真实用途。
 
@@ -416,7 +458,7 @@ tmux attach-session -t <session_name>
 - plan signoff 完成
 - execution review 完成
 
-此时 supervisor 会停住等你确认，再由你敲 `continue` 进入下一阶段。
+此时 supervisor 会停住等你确认，再由你敲 `continue`，或者在 Web UI 里点 `Continue`，进入下一阶段。
 
 ### 8.11 `abort`
 
@@ -434,10 +476,11 @@ tmux attach-session -t <session_name>
 
 ### 阶段 1：启动
 
-1. 用 `--no-attach` 启动
-2. 记下 `state_file`
-3. attach 进入 tmux
-4. 手动处理 Claude / Codex 可能出现的原生确认
+1. 用 `--no-attach --open-ui` 启动
+2. 记下 `state_file`、`control_url`、`web_url`
+3. 先看浏览器里的 Web UI
+4. 需要时 attach 进入 tmux
+5. 手动处理 Claude / Codex 可能出现的原生确认
 
 ### 阶段 2：观察 plan
 
@@ -464,9 +507,9 @@ note both
 
 每到一个 boundary：
 
-1. 先敲 `status`
-2. 必要时 `show final-plan` / `show package`
-3. 确认没有问题再 `continue`
+1. 先点 Web UI 里的 `Status` 或在 supervisor pane 里敲 `status`
+2. 必要时看 Web UI artifacts，或者 `show final-plan` / `show package`
+3. 确认没有问题再点 `Continue` 或敲 `continue`
 
 ### 阶段 4：execution 完成后检查 package
 

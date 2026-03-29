@@ -5,8 +5,14 @@ import asyncio
 import argparse
 import json
 from pathlib import Path
+import sys
+import time
 import traceback
+from typing import Any
+import urllib.error
+import urllib.request
 import uuid
+import webbrowser
 
 from live_api import LiveControlServer
 from live_engine import ProtocolStateMachine, RunLoop
@@ -54,10 +60,12 @@ from peer_consensus import (
     write_text,
 )
 
+CONTROL_READY_TIMEOUT_SECONDS = 30.0
+CONTROL_READY_POLL_SECONDS = 0.25
+CONTROL_HEALTH_TIMEOUT_SECONDS = 1.5
+
 
 def parse_args() -> argparse.Namespace:
-    import sys
-
     if len(sys.argv) > 1 and sys.argv[1] == "serve":
         return parse_serve_args(sys.argv[2:])
     if len(sys.argv) > 1 and sys.argv[1] == "resume":
@@ -139,6 +147,16 @@ def parse_start_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help="Enable Claude bare mode. Use this only when you explicitly want bare mode, such as API-key-based auth instead of Claude Max/OAuth.",
     )
+    parser.add_argument(
+        "--open-ui",
+        action="store_true",
+        help="Open the local live Web UI in the default browser once the control server is ready.",
+    )
+    parser.add_argument(
+        "--print-control-token",
+        action="store_true",
+        help="Explicitly print the local control API token in logs or detached JSON output.",
+    )
     args = parser.parse_args(argv)
     if args.signoff_rounds < 0:
         parser.error("--signoff-rounds must be >= 0.")
@@ -166,6 +184,16 @@ def parse_resume_args(argv: list[str]) -> argparse.Namespace:
         "--no-attach",
         action="store_true",
         help="Repair supervisor state if needed, but print attach info instead of attaching immediately.",
+    )
+    parser.add_argument(
+        "--open-ui",
+        action="store_true",
+        help="Open the local live Web UI in the default browser once the control server is ready.",
+    )
+    parser.add_argument(
+        "--print-control-token",
+        action="store_true",
+        help="Explicitly print the local control API token in logs or detached JSON output.",
     )
     return parser.parse_args(argv)
 
@@ -225,21 +253,201 @@ def ensure_control_runtime(
     control["token"] = str(control.get("token", "") or uuid.uuid4().hex)
     control.setdefault("base_url", "")
     control.setdefault("events_stream_url", "")
+    control.setdefault("web_url", "")
+    control["open_ui"] = bool(control.get("open_ui", False))
+    control["print_control_token"] = bool(control.get("print_control_token", False))
 
 
-def log_control_runtime(state: dict[str, object]) -> None:
+def update_control_preferences(
+    state: dict[str, object],
+    *,
+    open_ui: bool | None = None,
+    print_control_token: bool | None = None,
+) -> None:
+    runtime = state.setdefault("runtime", {})  # type: ignore[assignment]
+    if not isinstance(runtime, dict):
+        raise RuntimeError("runtime state is not an object")
+    control = runtime.setdefault("control", {})
+    if not isinstance(control, dict):
+        raise RuntimeError("runtime.control state is not an object")
+    if open_ui is not None:
+        control["open_ui"] = bool(open_ui)
+    if print_control_token is not None:
+        control["print_control_token"] = bool(print_control_token)
+
+
+def reset_control_runtime_urls(state: dict[str, object]) -> None:
     runtime = state.get("runtime", {})
     if not isinstance(runtime, dict):
         return
     control = runtime.get("control", {})
     if not isinstance(control, dict):
         return
-    base_url = str(control.get("base_url", "") or "")
-    if base_url:
-        supervisor_log_line(state, f"Control API: {base_url}")
+    control["base_url"] = ""
+    control["events_stream_url"] = ""
+    control["web_url"] = ""
+    control["last_started_at"] = ""
+
+
+def control_runtime_endpoints(state: dict[str, object]) -> dict[str, str]:
+    runtime = state.get("runtime", {})
+    if not isinstance(runtime, dict):
+        return {
+            "control_url": "",
+            "events_stream_url": "",
+            "web_url": "",
+            "control_token": "",
+        }
+    control = runtime.get("control", {})
+    if not isinstance(control, dict):
+        return {
+            "control_url": "",
+            "events_stream_url": "",
+            "web_url": "",
+            "control_token": "",
+        }
+    control_url = str(control.get("base_url", "") or "")
     events_stream_url = str(control.get("events_stream_url", "") or "")
-    if events_stream_url:
-        supervisor_log_line(state, f"Events stream: {events_stream_url}")
+    web_url = str(control.get("web_url", "") or "")
+    if not web_url and control_url:
+        web_url = f"{control_url}/"
+    return {
+        "control_url": control_url,
+        "events_stream_url": events_stream_url,
+        "web_url": web_url,
+        "control_token": str(control.get("token", "") or ""),
+    }
+
+
+def control_preferences(state: dict[str, object]) -> dict[str, bool]:
+    runtime = state.get("runtime", {})
+    if not isinstance(runtime, dict):
+        return {"open_ui": False, "print_control_token": False}
+    control = runtime.get("control", {})
+    if not isinstance(control, dict):
+        return {"open_ui": False, "print_control_token": False}
+    return {
+        "open_ui": bool(control.get("open_ui", False)),
+        "print_control_token": bool(control.get("print_control_token", False)),
+    }
+
+
+def control_health_ok(control_url: str, control_token: str) -> bool:
+    if not control_url or not control_token:
+        return False
+    request = urllib.request.Request(
+        f"{control_url}/health",
+        headers={"X-Peer-Forge-Token": control_token},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=CONTROL_HEALTH_TIMEOUT_SECONDS) as response:
+            if response.status != 200:
+                return False
+            payload = json.load(response)
+    except (OSError, ValueError, urllib.error.URLError):
+        return False
+    return bool(payload.get("ok", False))
+
+
+def wait_for_control_ready(
+    state_file: Path,
+    *,
+    timeout: float = CONTROL_READY_TIMEOUT_SECONDS,
+) -> tuple[dict[str, Any] | None, dict[str, str]]:
+    deadline = time.monotonic() + timeout
+    latest_state: dict[str, Any] | None = None
+    latest_endpoints = {
+        "control_url": "",
+        "events_stream_url": "",
+        "web_url": "",
+        "control_token": "",
+    }
+    while time.monotonic() < deadline:
+        try:
+            state = load_state(state_file)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            time.sleep(CONTROL_READY_POLL_SECONDS)
+            continue
+        latest_state = state
+        latest_endpoints = control_runtime_endpoints(state)
+        if (
+            latest_endpoints["control_url"]
+            and latest_endpoints["events_stream_url"]
+            and latest_endpoints["web_url"]
+            and latest_endpoints["control_token"]
+            and control_health_ok(latest_endpoints["control_url"], latest_endpoints["control_token"])
+        ):
+            return latest_state, latest_endpoints
+        time.sleep(CONTROL_READY_POLL_SECONDS)
+    return latest_state, latest_endpoints
+
+
+def enrich_detached_output(
+    payload: dict[str, Any],
+    *,
+    state_file: Path,
+    include_token: bool,
+) -> dict[str, Any]:
+    _, endpoints = wait_for_control_ready(state_file)
+    payload["control_url"] = endpoints["control_url"]
+    payload["events_stream_url"] = endpoints["events_stream_url"]
+    payload["web_url"] = endpoints["web_url"]
+    if include_token:
+        payload["control_token"] = endpoints["control_token"]
+    return payload
+
+
+def print_control_runtime_console(
+    endpoints: dict[str, str],
+    *,
+    include_token: bool,
+    stream: Any = None,
+) -> None:
+    target = stream or sys.stderr
+    print(f"[peer-forge-live] Control API: {endpoints['control_url'] or 'n/a'}", file=target, flush=True)
+    print(f"[peer-forge-live] Events stream: {endpoints['events_stream_url'] or 'n/a'}", file=target, flush=True)
+    print(f"[peer-forge-live] Web UI: {endpoints['web_url'] or 'n/a'}", file=target, flush=True)
+    if include_token:
+        print(f"[peer-forge-live] Control token: {endpoints['control_token'] or '(empty)'}", file=target, flush=True)
+
+
+def maybe_open_web_ui(
+    endpoints: dict[str, str],
+    *,
+    log_line: Any | None = None,
+    stream: Any = None,
+) -> bool:
+    web_url = endpoints.get("web_url", "")
+    if not web_url:
+        return False
+
+    def emit(message: str) -> None:
+        if log_line is not None:
+            log_line(message)
+            return
+        if stream is not None:
+            print(f"[peer-forge-live] {message}", file=stream, flush=True)
+
+    try:
+        opened = webbrowser.open(web_url, new=2)
+    except Exception as exc:
+        emit(f"Failed to auto-open Web UI: {type(exc).__name__}: {exc}. Open this URL manually: {web_url}")
+        return False
+    if opened:
+        emit(f"Opened Web UI: {web_url}")
+        return True
+    emit(f"Could not auto-open Web UI. Open this URL manually: {web_url}")
+    return False
+
+
+def log_control_runtime(state: dict[str, object]) -> None:
+    endpoints = control_runtime_endpoints(state)
+    preferences = control_preferences(state)
+    supervisor_log_line(state, f"Control API: {endpoints['control_url'] or 'n/a'}")
+    supervisor_log_line(state, f"Events stream: {endpoints['events_stream_url'] or 'n/a'}")
+    supervisor_log_line(state, f"Web UI: {endpoints['web_url'] or 'n/a'}")
+    if preferences["print_control_token"]:
+        supervisor_log_line(state, f"Control token: {endpoints['control_token'] or '(empty)'}")
 
 
 def start_mode(args: argparse.Namespace) -> int:
@@ -349,6 +557,11 @@ def start_mode(args: argparse.Namespace) -> int:
                 "state_file": str(state_path_from_run_dir(run_dir)),
                 "attach": f"tmux attach-session -t {session_name}",
             }
+            enrich_detached_output(
+                output,
+                state_file=state_path_from_run_dir(run_dir),
+                include_token=bool(args.print_control_token),
+            )
             print(json.dumps(output, indent=2, ensure_ascii=True))
             return 0
         transport.attach(session_name)
@@ -381,6 +594,11 @@ def start_mode(args: argparse.Namespace) -> int:
         supervisor_log_line(state, f"Supervisor running inline for {state['run_id']} using pty transport.")
         supervisor_log_line(state, "This is the live peer-forge protocol with plan, execution, review, and signoff phases.")
         log_control_runtime(state)
+        if control_preferences(state)["open_ui"]:
+            maybe_open_web_ui(
+                control_runtime_endpoints(state),
+                log_line=lambda message: supervisor_log_line(state, message),
+            )
         asyncio.run(runloop.serve())
         return 0
     except KeyboardInterrupt as exc:
@@ -417,6 +635,12 @@ def resume_mode(args: argparse.Namespace) -> int:
     state = load_state(state_file)
     if state.get("runtime", {}).get("transport") != "tmux":
         raise SystemExit("resume currently supports only tmux-backed live runs.")
+    ensure_control_runtime(state)
+    update_control_preferences(
+        state,
+        open_ui=bool(args.open_ui),
+        print_control_token=bool(args.print_control_token),
+    )
     transport = TmuxTransport(state)
     transport.ensure_available()
     session_name = state["session_name"]
@@ -430,6 +654,8 @@ def resume_mode(args: argparse.Namespace) -> int:
         state_file=state_file,
     )
     state["agents"]["supervisor"]["pane_id"] = supervisor_pane_id
+    if supervisor_action in {"supervisor-created", "supervisor-respawned"}:
+        reset_control_runtime_urls(state)
     save_state(state)
     write_supervisor_event(
         state,
@@ -443,20 +669,28 @@ def resume_mode(args: argparse.Namespace) -> int:
     )
 
     if args.no_attach:
-        print(
-            json.dumps(
-                {
-                    "run_id": state["run_id"],
-                    "session_name": session_name,
-                    "state_file": str(state_file),
-                    "attach": f"tmux attach-session -t {session_name}",
-                    "supervisor_action": supervisor_action,
-                },
-                indent=2,
-                ensure_ascii=True,
-            )
+        output = {
+            "run_id": state["run_id"],
+            "session_name": session_name,
+            "state_file": str(state_file),
+            "attach": f"tmux attach-session -t {session_name}",
+            "supervisor_action": supervisor_action,
+        }
+        enrich_detached_output(
+            output,
+            state_file=state_file,
+            include_token=bool(args.print_control_token),
         )
+        if args.open_ui and supervisor_action == "supervisor-resumed":
+            maybe_open_web_ui(control_runtime_endpoints(load_state(state_file)), stream=sys.stderr)
+        print(json.dumps(output, indent=2, ensure_ascii=True))
         return 0
+    if supervisor_action == "supervisor-resumed" and (args.open_ui or args.print_control_token):
+        _, endpoints = wait_for_control_ready(state_file)
+        if args.print_control_token:
+            print_control_runtime_console(endpoints, include_token=True, stream=sys.stderr)
+        if args.open_ui:
+            maybe_open_web_ui(endpoints, stream=sys.stderr)
     transport.attach(session_name)
     return 0
 
@@ -750,6 +984,11 @@ def serve_mode(args: argparse.Namespace) -> int:
     supervisor_log_line(state, f"Supervisor attached to {state['run_id']} in session {state['session_name']}.")
     supervisor_log_line(state, "This is the live peer-forge protocol with plan, execution, review, and signoff phases.")
     log_control_runtime(state)
+    if control_preferences(state)["open_ui"]:
+        maybe_open_web_ui(
+            control_runtime_endpoints(state),
+            log_line=lambda message: supervisor_log_line(state, message),
+        )
     try:
         asyncio.run(runloop.serve())
         return 0

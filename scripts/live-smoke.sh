@@ -26,16 +26,27 @@ start_output="$("$repo_root/bin/peer-forge-live" \
   --no-attach \
   --run-root "$run_root")"
 
-start_lines="$(printf '%s' "$start_output" | python3 -c 'import json, sys; data = json.load(sys.stdin); print(data["run_id"]); print(data["session_name"]); print(data["run_dir"]); print(data["state_file"]); print(data["attach"])')"
+start_lines="$(printf '%s' "$start_output" | python3 -c 'import json, sys; data = json.load(sys.stdin); print(data["run_id"]); print(data["session_name"]); print(data["run_dir"]); print(data["state_file"]); print(data["attach"]); print(data["control_url"]); print(data["events_stream_url"]); print(data["web_url"])')"
 run_id="$(printf '%s\n' "$start_lines" | sed -n '1p')"
 session_name="$(printf '%s\n' "$start_lines" | sed -n '2p')"
 run_dir="$(printf '%s\n' "$start_lines" | sed -n '3p')"
 state_file="$(printf '%s\n' "$start_lines" | sed -n '4p')"
 attach_cmd="$(printf '%s\n' "$start_lines" | sed -n '5p')"
+control_url="$(printf '%s\n' "$start_lines" | sed -n '6p')"
+events_stream_url="$(printf '%s\n' "$start_lines" | sed -n '7p')"
+web_url="$(printf '%s\n' "$start_lines" | sed -n '8p')"
 
 echo "[live-smoke] run_id=$run_id"
 echo "[live-smoke] session=$session_name"
 echo "[live-smoke] attach=$attach_cmd"
+echo "[live-smoke] control=$control_url"
+echo "[live-smoke] events=$events_stream_url"
+echo "[live-smoke] web=$web_url"
+
+if [[ -z "$control_url" || -z "$events_stream_url" || -z "$web_url" ]]; then
+  echo "[live-smoke] detached JSON did not include control URLs" >&2
+  exit 1
+fi
 
 tmux has-session -t "$session_name"
 pane_count="$(tmux list-panes -t "$session_name" | wc -l | tr -d ' ')"
@@ -82,10 +93,17 @@ sleep 1
 
 echo "[live-smoke] resuming supervisor"
 resume_output="$("$repo_root/bin/peer-forge-live" resume --state-file "$state_file" --no-attach)"
-resume_lines="$(printf '%s' "$resume_output" | python3 -c 'import json, sys; data = json.load(sys.stdin); print(data["run_id"]); print(data["session_name"]); print(data["state_file"]); print(data["supervisor_action"])')"
+resume_lines="$(printf '%s' "$resume_output" | python3 -c 'import json, sys; data = json.load(sys.stdin); print(data["run_id"]); print(data["session_name"]); print(data["state_file"]); print(data["supervisor_action"]); print(data["control_url"]); print(data["events_stream_url"]); print(data["web_url"])')"
 resume_action="$(printf '%s\n' "$resume_lines" | sed -n '4p')"
+resume_control_url="$(printf '%s\n' "$resume_lines" | sed -n '5p')"
+resume_events_stream_url="$(printf '%s\n' "$resume_lines" | sed -n '6p')"
+resume_web_url="$(printf '%s\n' "$resume_lines" | sed -n '7p')"
 if [[ "$resume_action" != "supervisor-created" && "$resume_action" != "supervisor-respawned" && "$resume_action" != "supervisor-resumed" ]]; then
   echo "[live-smoke] unexpected resume action: $resume_action" >&2
+  exit 1
+fi
+if [[ -z "$resume_control_url" || -z "$resume_events_stream_url" || -z "$resume_web_url" ]]; then
+  echo "[live-smoke] resumed detached JSON did not include control URLs" >&2
   exit 1
 fi
 

@@ -130,6 +130,7 @@ If the user explicitly wants:
 - two long-lived interactive sessions
 - side-by-side live visibility
 - tmux panes and supervisor intervention
+- the detached local Web UI with browser-based supervision
 - session memory across turns
 
 then use `peer-forge-live` instead of the batch launcher.

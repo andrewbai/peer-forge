@@ -24,43 +24,25 @@ start_output="$("$repo_root/bin/peer-forge-live" \
   --signoff-rounds 0 \
   --watchdog-seconds 0 \
   --no-attach \
+  --print-control-token \
   --run-root "$run_root")"
 
-start_lines="$(printf '%s' "$start_output" | python3 -c 'import json, sys; data = json.load(sys.stdin); print(data["run_id"]); print(data["session_name"]); print(data["state_file"])')"
+start_lines="$(printf '%s' "$start_output" | python3 -c 'import json, sys; data = json.load(sys.stdin); print(data["run_id"]); print(data["session_name"]); print(data["state_file"]); print(data["control_url"]); print(data["events_stream_url"]); print(data["web_url"]); print(data["control_token"])')"
 run_id="$(printf '%s\n' "$start_lines" | sed -n '1p')"
 session_name="$(printf '%s\n' "$start_lines" | sed -n '2p')"
 state_file="$(printf '%s\n' "$start_lines" | sed -n '3p')"
+base_url="$(printf '%s\n' "$start_lines" | sed -n '4p')"
+events_stream_url="$(printf '%s\n' "$start_lines" | sed -n '5p')"
+web_url="$(printf '%s\n' "$start_lines" | sed -n '6p')"
+token="$(printf '%s\n' "$start_lines" | sed -n '7p')"
 
 echo "[live-web-smoke] run_id=$run_id"
 echo "[live-web-smoke] session=$session_name"
-
-control_output="$(python3 - "$state_file" <<'PY'
-import json
-import pathlib
-import sys
-import time
-
-state_path = pathlib.Path(sys.argv[1])
-deadline = time.time() + 30
-while time.time() < deadline:
-    state = json.loads(state_path.read_text(encoding="utf-8"))
-    control = state.get("runtime", {}).get("control", {})
-    base_url = str(control.get("base_url", "") or "")
-    token = str(control.get("token", "") or "")
-    if base_url and token:
-        print(base_url)
-        print(token)
-        raise SystemExit(0)
-    time.sleep(0.5)
-raise SystemExit("control API did not become ready within 30 seconds")
-PY
-)"
-
-base_url="$(printf '%s\n' "$control_output" | sed -n '1p')"
-token="$(printf '%s\n' "$control_output" | sed -n '2p')"
 echo "[live-web-smoke] control=$base_url"
+echo "[live-web-smoke] events=$events_stream_url"
+echo "[live-web-smoke] web=$web_url"
 
-page_html="$(curl -sf "$base_url/")"
+page_html="$(curl -sf "$web_url")"
 PAGE_HTML="$page_html" python3 - "$run_id" "$token" <<'PY'
 import os
 import sys
@@ -79,7 +61,7 @@ for asset in /app.css /app.js /render.js /store.js; do
   echo "[live-web-smoke] asset ok $asset"
 done
 
-stream_output="$(curl -sfN --max-time 3 "$base_url/events/stream?token=$token" || true)"
+stream_output="$(curl -sfN --max-time 3 "$events_stream_url?token=$token" || true)"
 STREAM_OUTPUT="$stream_output" python3 - <<'PY'
 import os
 

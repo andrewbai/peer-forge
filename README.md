@@ -36,7 +36,9 @@ peer-forge/
 ├── peer-forge-upgrade/
 │   └── SKILL.md
 ├── tools/
+│   ├── live_api.py
 │   ├── live_protocol.py
+│   ├── live_state.py
 │   ├── live_tmux.py
 │   ├── peer_consensus.py
 │   └── peer_live.py
@@ -46,8 +48,17 @@ peer-forge/
 │   ├── peer-forge-live
 │   └── peer-forge-upgrade
 ├── scripts/
+│   ├── live-api-smoke.sh
 │   ├── live-apply-smoke.sh
-│   └── live-smoke.sh
+│   ├── live-smoke.sh
+│   └── live-web-smoke.sh
+├── web/
+│   └── live/
+│       ├── index.html
+│       ├── app.js
+│       ├── render.js
+│       ├── store.js
+│       └── app.css
 ├── setup
 ├── uninstall
 ├── README.md
@@ -139,6 +150,34 @@ Live tmux mode:
   --task "Have Claude Code and Codex draft plans independently, cross-review, and converge while I supervise live."
 ```
 
+Recommended detached + browser-supervised startup:
+
+```bash
+~/.claude/skills/peer-forge/bin/peer-forge-live \
+  --repo . \
+  --task "Have Claude Code and Codex draft plans independently, cross-review, and converge while I supervise live." \
+  --no-attach \
+  --open-ui
+```
+
+If you also want to call the local control API directly from `curl` or your own tooling:
+
+```bash
+~/.claude/skills/peer-forge/bin/peer-forge-live \
+  --repo . \
+  --task "Have Claude Code and Codex draft plans independently, cross-review, and converge while I supervise live." \
+  --no-attach \
+  --open-ui \
+  --print-control-token
+```
+
+Detached startup JSON now includes:
+
+- `control_url`
+- `events_stream_url`
+- `web_url`
+- `control_token` when `--print-control-token` is set
+
 `peer-forge-live` now starts Claude without `--bare` by default so Claude Max, OAuth, and keychain-backed auth continue to work in interactive live sessions.
 
 Only opt into bare mode when you explicitly want it:
@@ -154,7 +193,8 @@ Resume or re-attach to an existing live run:
 
 ```bash
 ~/.claude/skills/peer-forge/bin/peer-forge-live resume \
-  --state-file /path/to/state.json
+  --state-file /path/to/state.json \
+  --open-ui
 ```
 
 Preview how an approved live run would land back into the target repo:
@@ -255,6 +295,13 @@ Startup note:
 - Codex may also ask you to trust the generated workspace on some machines or first-run states.
 - We intentionally do not auto-press those prompts via tmux, because that is more brittle than letting the human supervisor confirm them once.
 
+Recommended supervision path:
+
+1. Start with `--no-attach --open-ui`.
+2. Use `web_url` for the browser dashboard, event feed, artifacts, and boundary controls.
+3. Use `control_url` plus `control_token` only when you want direct API or SSE access outside the built-in UI.
+4. Keep tmux for CLI-native trust/bypass prompts and low-level pane inspection.
+
 Inside the supervisor pane, the main commands are:
 
 - `status`
@@ -273,11 +320,19 @@ Inside the supervisor pane, the main commands are:
 
 `status` now also surfaces the selected executor/reviewer, plan/execution approval state, read-only violations, current package summary, and each pane's current mode.
 
+The built-in Web UI drives the same supervisor actions:
+
+- `Status` queues `status`
+- `Continue` is only enabled at active boundaries
+- `Abort` queues `abort`
+- the note form queues `note both <text>`
+
 If the supervisor pane dies or you detach and want to repair the session in place:
 
 ```bash
 ~/.claude/skills/peer-forge/bin/peer-forge-live resume \
-  --state-file <target-repo>/.claude/tmp/peer-forge-live/<run-id>/state.json
+  --state-file <target-repo>/.claude/tmp/peer-forge-live/<run-id>/state.json \
+  --open-ui
 ```
 
 If the live run finished and both plan and execution are approved, you can preview or apply the final execution package:
@@ -323,8 +378,10 @@ That includes:
 
 Manual smoke coverage for live startup and supervisor recovery is included in:
 
+- `scripts/live-api-smoke.sh`
 - `scripts/live-smoke.sh`
 - `scripts/live-apply-smoke.sh`
+- `scripts/live-web-smoke.sh`
 
 ## Artifacts
 

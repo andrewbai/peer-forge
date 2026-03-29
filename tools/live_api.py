@@ -121,6 +121,7 @@ class LiveControlServer:
         control["port"] = actual_port
         control["base_url"] = base_url
         control["events_stream_url"] = f"{base_url}/events/stream"
+        control["web_url"] = f"{base_url}/"
         control["last_started_at"] = utc_timestamp_precise()
         save_state(self.state)
         write_supervisor_event(

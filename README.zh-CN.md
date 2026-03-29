@@ -39,7 +39,9 @@ peer-forge/
 ├── peer-forge-upgrade/
 │   └── SKILL.md
 ├── tools/
+│   ├── live_api.py
 │   ├── live_protocol.py
+│   ├── live_state.py
 │   ├── live_tmux.py
 │   ├── peer_consensus.py
 │   └── peer_live.py
@@ -49,8 +51,17 @@ peer-forge/
 │   ├── peer-forge-live
 │   └── peer-forge-upgrade
 ├── scripts/
+│   ├── live-api-smoke.sh
 │   ├── live-apply-smoke.sh
-│   └── live-smoke.sh
+│   ├── live-smoke.sh
+│   └── live-web-smoke.sh
+├── web/
+│   └── live/
+│       ├── index.html
+│       ├── app.js
+│       ├── render.js
+│       ├── store.js
+│       └── app.css
 ├── setup
 ├── uninstall
 ├── README.md
@@ -142,6 +153,34 @@ live tmux 模式：
   --task "让 Claude Code 和 Codex 独立出方案、互相 review，并且我在旁边实时监督。"
 ```
 
+推荐的 detached + 浏览器监督启动方式：
+
+```bash
+~/.claude/skills/peer-forge/bin/peer-forge-live \
+  --repo . \
+  --task "让 Claude Code 和 Codex 独立出方案、互相 review，并且我在旁边实时监督。" \
+  --no-attach \
+  --open-ui
+```
+
+如果你还想直接用 `curl` 或自定义脚本访问本地 control API：
+
+```bash
+~/.claude/skills/peer-forge/bin/peer-forge-live \
+  --repo . \
+  --task "让 Claude Code 和 Codex 独立出方案、互相 review，并且我在旁边实时监督。" \
+  --no-attach \
+  --open-ui \
+  --print-control-token
+```
+
+detached 启动输出的 JSON 现在会补充：
+
+- `control_url`
+- `events_stream_url`
+- `web_url`
+- 传了 `--print-control-token` 时额外给出 `control_token`
+
 `peer-forge-live` 现在默认不会给 Claude 加 `--bare`，这样 Claude Max、OAuth 和 keychain 登录态在交互式 live session 里可以继续使用。
 
 只有在你明确需要 bare mode 时才显式开启：
@@ -157,7 +196,8 @@ live tmux 模式：
 
 ```bash
 ~/.claude/skills/peer-forge/bin/peer-forge-live resume \
-  --state-file /path/to/state.json
+  --state-file /path/to/state.json \
+  --open-ui
 ```
 
 预览一个已批准的 live run 会如何落回目标仓库：
@@ -261,6 +301,13 @@ git --version
 - 在某些机器或首次进入新工作区时，Codex 也可能会先要求你确认 trust。
 - 这里故意不做 tmux 自动按键确认，因为那种做法比人工确认一次更脆弱，也更容易被 CLI 升级打断。
 
+推荐的监督路径：
+
+1. 用 `--no-attach --open-ui` 启动。
+2. 浏览器打开 `web_url`，在 Web UI 里看时间线、事件流、产物和边界按钮。
+3. 只有在你要自己调 API / SSE 时，才使用 `control_url` 加 `control_token`。
+4. tmux 继续保留给原生 trust / bypass 确认，以及低层 pane 检查。
+
 supervisor pane 里的主要命令：
 
 - `status`
@@ -279,11 +326,19 @@ supervisor pane 里的主要命令：
 
 `status` 现在还会显示当前 executor/reviewer、plan/execution 是否已批准、只读违规次数、当前 package 摘要，以及每个 pane 当前是 `read-only` 还是 `write`。
 
+内置 Web UI 操作和 supervisor 命令是一一对应的：
+
+- `Status` 按钮对应 `status`
+- `Continue` 只会在边界暂停时可用
+- `Abort` 对应 `abort`
+- note 表单会排队成 `note both <text>`
+
 如果 supervisor pane 挂掉了，或者你 detach 之后想原地修复会话：
 
 ```bash
 ~/.claude/skills/peer-forge/bin/peer-forge-live resume \
-  --state-file <target-repo>/.claude/tmp/peer-forge-live/<run-id>/state.json
+  --state-file <target-repo>/.claude/tmp/peer-forge-live/<run-id>/state.json \
+  --open-ui
 ```
 
 如果 live run 已结束，而且 plan / execution 都批准了，就可以预览或 apply 最终 execution package：
@@ -329,8 +384,10 @@ apply 语义：
 
 另外，仓库里还带了一个用于验证 live 启动和 supervisor 恢复链路的 smoke 脚本：
 
+- `scripts/live-api-smoke.sh`
 - `scripts/live-smoke.sh`
 - `scripts/live-apply-smoke.sh`
+- `scripts/live-web-smoke.sh`
 
 ## 运行产物
 

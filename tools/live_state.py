@@ -128,6 +128,9 @@ def normalize_state(state: dict[str, Any]) -> None:
     control.setdefault("token", "")
     control.setdefault("base_url", "")
     control.setdefault("events_stream_url", "")
+    control.setdefault("web_url", "")
+    control.setdefault("open_ui", False)
+    control.setdefault("print_control_token", False)
     boundary = state["runtime"].setdefault("boundary", {})
     boundary.setdefault("active", False)
     boundary.setdefault("label", "")
@@ -1234,6 +1237,9 @@ def initialize_state(args: argparse.Namespace, *, repo: Path, task: str, run_dir
                 "token": "",
                 "base_url": "",
                 "events_stream_url": "",
+                "web_url": "",
+                "open_ui": bool(getattr(args, "open_ui", False)),
+                "print_control_token": bool(getattr(args, "print_control_token", False)),
             },
             "boundary": {
                 "active": False,

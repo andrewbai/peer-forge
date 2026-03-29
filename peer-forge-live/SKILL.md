@@ -67,7 +67,9 @@ Global install:
 ```bash
 ~/.claude/skills/peer-forge/bin/peer-forge-live \
   --repo . \
-  --task "用户的原始任务"
+  --task "用户的原始任务" \
+  --no-attach \
+  --open-ui
 ```
 
 If the current project vendors `peer-forge` locally:
@@ -75,7 +77,9 @@ If the current project vendors `peer-forge` locally:
 ```bash
 ./.claude/skills/peer-forge/bin/peer-forge-live \
   --repo . \
-  --task "用户的原始任务"
+  --task "用户的原始任务" \
+  --no-attach \
+  --open-ui
 ```
 
 Optional inputs:
@@ -96,7 +100,19 @@ If the user wants the tmux session created without auto-attach:
 ~/.claude/skills/peer-forge/bin/peer-forge-live \
   --repo . \
   --task "用户的原始任务" \
-  --no-attach
+  --no-attach \
+  --open-ui
+```
+
+If the user wants the detached JSON to include the local control token for direct API calls:
+
+```bash
+~/.claude/skills/peer-forge/bin/peer-forge-live \
+  --repo . \
+  --task "用户的原始任务" \
+  --no-attach \
+  --open-ui \
+  --print-control-token
 ```
 
 `peer-forge-live` 默认不会给 Claude 加 `--bare`，这样 Claude Max、OAuth 和 keychain 登录态可以在 live 交互会话里继续使用。
@@ -114,7 +130,8 @@ If the user already has a `state.json` and wants to re-attach or repair the supe
 
 ```bash
 ~/.claude/skills/peer-forge/bin/peer-forge-live resume \
-  --state-file /path/to/state.json
+  --state-file /path/to/state.json \
+  --open-ui
 ```
 
 If the user wants to preview or land an approved live run back into the repo:
@@ -167,6 +184,13 @@ Important startup behavior:
 - Codex may also show a trust confirmation depending on local CLI state and workspace history.
 - This is intentional. Do not implement tmux keypress hacks unless the user explicitly asks for that tradeoff.
 
+Detached browser flow:
+
+- `--no-attach` returns JSON with `run_id`, `session_name`, `run_dir`, `state_file`, `attach`, `control_url`, `events_stream_url`, and `web_url`.
+- `--print-control-token` adds `control_token` to that JSON.
+- `--open-ui` best-effort opens `web_url` in the default browser once the local control server is ready.
+- Use the Web UI for timeline, artifacts, events, and boundary actions; keep tmux for trust prompts and raw pane inspection.
+
 ## Live Supervisor Commands
 
 Inside the supervisor pane:
@@ -190,6 +214,7 @@ Rules:
 - Notes are queued into the next turn for both agents equally.
 - `continue` is used at phase boundaries after both sides finish a turn.
 - `status` also shows executor/reviewer, plan/execution approval state, read-only violations, current package summary, and each pane's current mode.
+- In the browser UI, `Status`, `Continue`, `Abort`, and the note form map to these same supervisor actions.
 
 Live apply rules:
 - `apply` without `--apply` is dry-run only.

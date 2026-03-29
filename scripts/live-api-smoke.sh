@@ -24,41 +24,42 @@ start_output="$("$repo_root/bin/peer-forge-live" \
   --signoff-rounds 0 \
   --watchdog-seconds 0 \
   --no-attach \
+  --print-control-token \
   --run-root "$run_root")"
 
-start_lines="$(printf '%s' "$start_output" | python3 -c 'import json, sys; data = json.load(sys.stdin); print(data["run_id"]); print(data["session_name"]); print(data["state_file"])')"
+start_lines="$(printf '%s' "$start_output" | python3 -c 'import json, sys; data = json.load(sys.stdin); print(data["run_id"]); print(data["session_name"]); print(data["state_file"]); print(data["control_url"]); print(data["events_stream_url"]); print(data["web_url"]); print(data["control_token"])')"
 run_id="$(printf '%s\n' "$start_lines" | sed -n '1p')"
 session_name="$(printf '%s\n' "$start_lines" | sed -n '2p')"
 state_file="$(printf '%s\n' "$start_lines" | sed -n '3p')"
+base_url="$(printf '%s\n' "$start_lines" | sed -n '4p')"
+events_stream_url="$(printf '%s\n' "$start_lines" | sed -n '5p')"
+web_url="$(printf '%s\n' "$start_lines" | sed -n '6p')"
+token="$(printf '%s\n' "$start_lines" | sed -n '7p')"
 
 echo "[live-api-smoke] run_id=$run_id"
 echo "[live-api-smoke] session=$session_name"
+echo "[live-api-smoke] control=$base_url"
+echo "[live-api-smoke] events=$events_stream_url"
+echo "[live-api-smoke] web=$web_url"
 
-control_output="$(python3 - "$state_file" <<'PY'
+python3 - "$state_file" "$base_url" "$events_stream_url" "$web_url" "$token" <<'PY'
 import json
 import pathlib
 import sys
-import time
 
 state_path = pathlib.Path(sys.argv[1])
-deadline = time.time() + 30
-while time.time() < deadline:
-    state = json.loads(state_path.read_text(encoding="utf-8"))
-    control = state.get("runtime", {}).get("control", {})
-    base_url = str(control.get("base_url", "") or "")
-    token = str(control.get("token", "") or "")
-    if base_url and token:
-        print(base_url)
-        print(token)
-        raise SystemExit(0)
-    time.sleep(0.5)
-raise SystemExit("control API did not become ready within 30 seconds")
+expected = sys.argv[2:]
+state = json.loads(state_path.read_text(encoding="utf-8"))
+control = state.get("runtime", {}).get("control", {})
+actual = [
+    str(control.get("base_url", "") or ""),
+    str(control.get("events_stream_url", "") or ""),
+    str(control.get("web_url", "") or ""),
+    str(control.get("token", "") or ""),
+]
+if actual != expected:
+    raise SystemExit(f"detached JSON control fields do not match state: actual={actual!r} expected={expected!r}")
 PY
-)"
-
-base_url="$(printf '%s\n' "$control_output" | sed -n '1p')"
-token="$(printf '%s\n' "$control_output" | sed -n '2p')"
-echo "[live-api-smoke] control=$base_url"
 
 curl -sf \
   -H "X-Peer-Forge-Token: $token" \
