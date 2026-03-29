@@ -8,6 +8,7 @@ from pathlib import Path
 import traceback
 import uuid
 
+from live_api import LiveControlServer
 from live_engine import ProtocolStateMachine, RunLoop
 from live_state import (
     branch_exists,
@@ -32,7 +33,7 @@ from live_state import (
     supervisor_log_line,
     write_supervisor_event,
 )
-from live_supervisor import CliSupervisor
+from live_supervisor import CliSupervisor, QueueSupervisor
 from live_transport import (
     build_claude_command,
     build_codex_command,
@@ -112,6 +113,17 @@ def parse_start_args(argv: list[str]) -> argparse.Namespace:
         help="Override the artifact root. Defaults to <repo>/.claude/tmp/peer-forge-live.",
     )
     parser.add_argument(
+        "--control-host",
+        default="127.0.0.1",
+        help="Host for the local control API. Default: 127.0.0.1.",
+    )
+    parser.add_argument(
+        "--control-port",
+        type=int,
+        default=0,
+        help="Port for the local control API. Use 0 for an ephemeral port. Default: 0.",
+    )
+    parser.add_argument(
         "--session-name",
         help="Optional tmux session name. Defaults to peer-forge-live-<run suffix>.",
     )
@@ -132,6 +144,8 @@ def parse_start_args(argv: list[str]) -> argparse.Namespace:
         parser.error("--watchdog-seconds must be >= 0.")
     if args.max_watchdog_nudges < 0:
         parser.error("--max-watchdog-nudges must be >= 0.")
+    if args.control_port < 0 or args.control_port > 65535:
+        parser.error("--control-port must be between 0 and 65535.")
     return args
 
 
@@ -190,6 +204,42 @@ def parse_apply_args(argv: list[str]) -> argparse.Namespace:
     return args
 
 
+def ensure_control_runtime(
+    state: dict[str, object],
+    *,
+    host: str | None = None,
+    port: int | None = None,
+) -> None:
+    runtime = state.setdefault("runtime", {})  # type: ignore[assignment]
+    if not isinstance(runtime, dict):
+        raise RuntimeError("runtime state is not an object")
+    runtime["supervisor"] = "queue"
+    control = runtime.setdefault("control", {})
+    if not isinstance(control, dict):
+        raise RuntimeError("runtime.control state is not an object")
+    control["enabled"] = True
+    control["host"] = host if host is not None else str(control.get("host", "127.0.0.1") or "127.0.0.1")
+    control["port"] = int(port if port is not None else int(control.get("port", 0) or 0))
+    control["token"] = str(control.get("token", "") or uuid.uuid4().hex)
+    control.setdefault("base_url", "")
+    control.setdefault("events_stream_url", "")
+
+
+def log_control_runtime(state: dict[str, object]) -> None:
+    runtime = state.get("runtime", {})
+    if not isinstance(runtime, dict):
+        return
+    control = runtime.get("control", {})
+    if not isinstance(control, dict):
+        return
+    base_url = str(control.get("base_url", "") or "")
+    if base_url:
+        supervisor_log_line(state, f"Control API: {base_url}")
+    events_stream_url = str(control.get("events_stream_url", "") or "")
+    if events_stream_url:
+        supervisor_log_line(state, f"Events stream: {events_stream_url}")
+
+
 def start_mode(args: argparse.Namespace) -> int:
     ensure_cli("claude")
     ensure_cli("codex")
@@ -209,6 +259,7 @@ def start_mode(args: argparse.Namespace) -> int:
     )
 
     state = initialize_state(args, repo=repo, task=task, run_dir=run_dir, session_name=session_name)
+    ensure_control_runtime(state, host=args.control_host, port=args.control_port)
     save_state(state)
     if args.transport == "tmux":
         transport = TmuxTransport(state)
@@ -237,7 +288,8 @@ def start_mode(args: argparse.Namespace) -> int:
     initial_turn = machine.create_initial_turn()
     claude_prompt_path = Path(initial_turn["agents"]["claude"]["session_prompt_path"])
     codex_prompt_path = Path(initial_turn["agents"]["codex"]["session_prompt_path"])
-    supervisor = CliSupervisor(state, transport)
+    supervisor: QueueSupervisor | CliSupervisor
+    supervisor = QueueSupervisor(state, transport) if args.transport == "tmux" else CliSupervisor(state, transport)
     runloop = RunLoop(state, transport=transport, supervisor=supervisor, machine=machine)
 
     if args.transport == "tmux":
@@ -300,7 +352,10 @@ def start_mode(args: argparse.Namespace) -> int:
         transport.attach(session_name)
         return 0
 
+    api_server = LiveControlServer(state, supervisor)
     try:
+        supervisor.start()
+        api_server.start()
         asyncio.run(runloop.dispatch_turn(initial_turn, send_prompts=False))
         transport.start_agent(
             "claude",
@@ -323,6 +378,7 @@ def start_mode(args: argparse.Namespace) -> int:
         save_state(state)
         supervisor_log_line(state, f"Supervisor running inline for {state['run_id']} using pty transport.")
         supervisor_log_line(state, "This is the live peer-forge protocol with plan, execution, review, and signoff phases.")
+        log_control_runtime(state)
         asyncio.run(runloop.serve())
         return 0
     except KeyboardInterrupt as exc:
@@ -343,6 +399,8 @@ def start_mode(args: argparse.Namespace) -> int:
         supervisor_log_line(state, f"Live run failed: {type(exc).__name__}: {exc}")
         return 1
     finally:
+        api_server.shutdown()
+        supervisor.shutdown()
         asyncio.run(transport.shutdown())
 
 
@@ -670,13 +728,24 @@ def serve_mode(args: argparse.Namespace) -> int:
     state = load_state(state_file)
     if state.get("runtime", {}).get("transport") != "tmux":
         raise SystemExit("serve is only valid for tmux-backed live runs.")
+    control = state.get("runtime", {}).get("control", {})
+    ensure_control_runtime(
+        state,
+        host=str(control.get("host", "127.0.0.1") or "127.0.0.1"),
+        port=int(control.get("port", 0) or 0),
+    )
+    save_state(state)
     transport = TmuxTransport(state)
     transport.ensure_available()
     supervisor = CliSupervisor(state, transport)
+    supervisor.start()
+    api_server = LiveControlServer(state, supervisor)
+    api_server.start()
     machine = ProtocolStateMachine(state)
     runloop = RunLoop(state, transport=transport, supervisor=supervisor, machine=machine)
     supervisor_log_line(state, f"Supervisor attached to {state['run_id']} in session {state['session_name']}.")
     supervisor_log_line(state, "This is the live peer-forge protocol with plan, execution, review, and signoff phases.")
+    log_control_runtime(state)
     try:
         asyncio.run(runloop.serve())
         return 0
@@ -697,6 +766,9 @@ def serve_mode(args: argparse.Namespace) -> int:
         persist_report(state)
         supervisor_log_line(state, f"Live run failed: {type(exc).__name__}: {exc}")
         return 1
+    finally:
+        api_server.shutdown()
+        supervisor.shutdown()
 
 
 def main() -> int:

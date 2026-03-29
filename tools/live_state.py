@@ -91,8 +91,15 @@ def normalize_state(state: dict[str, Any]) -> None:
     state["summary"].setdefault("last_apply_report", "")
     state["summary"].setdefault("last_apply_attempt_id", "")
     state["runtime"].setdefault("transport", "tmux")
-    state["runtime"].setdefault("supervisor", "cli")
+    state["runtime"].setdefault("supervisor", "queue")
     state["runtime"].setdefault("transport_resume_supported", True)
+    control = state["runtime"].setdefault("control", {})
+    control.setdefault("enabled", True)
+    control.setdefault("host", "127.0.0.1")
+    control.setdefault("port", 0)
+    control.setdefault("token", "")
+    control.setdefault("base_url", "")
+    control.setdefault("events_stream_url", "")
     for agent in AGENTS:
         state["agents"].setdefault(agent, {})
         state["agents"][agent].setdefault("workspace", "")
@@ -916,8 +923,16 @@ def initialize_state(args: argparse.Namespace, *, repo: Path, task: str, run_dir
         ],
         "runtime": {
             "transport": str(getattr(args, "transport", "tmux")),
-            "supervisor": "cli",
+            "supervisor": "queue",
             "transport_resume_supported": str(getattr(args, "transport", "tmux")) == "tmux",
+            "control": {
+                "enabled": True,
+                "host": str(getattr(args, "control_host", "127.0.0.1") or "127.0.0.1"),
+                "port": int(getattr(args, "control_port", 0) or 0),
+                "token": "",
+                "base_url": "",
+                "events_stream_url": "",
+            },
         },
         "notes": [],
         "turns": [],

@@ -132,9 +132,17 @@ class TmuxTransport:
         state_file: Path,
     ) -> tuple[str, str]:
         panes = list_panes(session_name)
-        claude_pane = pane_by_title(panes, self.CLAUDE_TITLE)
-        codex_pane = pane_by_title(panes, self.CODEX_TITLE)
-        supervisor_pane = pane_by_title(panes, self.SUPERVISOR_TITLE)
+        panes_by_id = {pane["pane_id"]: pane for pane in panes}
+
+        def resolve_pane(agent: str, title: str) -> dict[str, str] | None:
+            pane_id = str(self.state["agents"].get(agent, {}).get("pane_id", "") or "")
+            if pane_id and pane_id in panes_by_id:
+                return panes_by_id[pane_id]
+            return pane_by_title(panes, title)
+
+        claude_pane = resolve_pane("claude", self.CLAUDE_TITLE)
+        codex_pane = resolve_pane("codex", self.CODEX_TITLE)
+        supervisor_pane = resolve_pane("supervisor", self.SUPERVISOR_TITLE)
         for agent, pane in (("claude", claude_pane), ("codex", codex_pane)):
             if pane is None:
                 raise SystemExit(f"{agent} pane is missing in tmux session {session_name}; live resume cannot repair agent panes.")
@@ -145,6 +153,7 @@ class TmuxTransport:
             self.state["agents"][agent]["pane_id"] = pane["pane_id"]
             self.state["agents"][agent]["transport_ref"] = pane["pane_id"]
             self.state["agents"][agent]["transport_kind"] = "tmux"
+            set_pane_title(pane["pane_id"], self.CLAUDE_TITLE if agent == "claude" else self.CODEX_TITLE)
 
         supervisor_action = "supervisor-resumed"
         if supervisor_pane is None:

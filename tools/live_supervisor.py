@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
-import select
+import queue
 import sys
+import threading
+import uuid
 from typing import Any, TextIO
 
 from peer_consensus import clip_text, utc_timestamp_precise, write_json
@@ -27,19 +29,50 @@ from live_state import (
 )
 
 
-class CliSupervisor:
+class QueueSupervisor:
     def __init__(
         self,
         state: dict[str, Any],
         transport: Any,
         *,
-        input_stream: TextIO | None = None,
         output_stream: TextIO | None = None,
     ) -> None:
         self.state = state
         self.transport = transport
-        self.input_stream = input_stream or sys.stdin
         self.output_stream = output_stream or sys.stdout
+        self.command_queue: queue.Queue[dict[str, Any]] = queue.Queue()
+
+    def start(self) -> None:
+        return
+
+    def shutdown(self) -> None:
+        return
+
+    def submit_command(
+        self,
+        raw_command: str,
+        *,
+        source: str = "external",
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        item = {
+            "request_id": request_id or f"cmd-{uuid.uuid4().hex[:10]}",
+            "source": source,
+            "raw_command": raw_command,
+            "queued_at": utc_timestamp_precise(),
+        }
+        self.command_queue.put(item)
+        write_supervisor_event(
+            self.state,
+            {
+                "type": "command-enqueued",
+                "timestamp": item["queued_at"],
+                "request_id": item["request_id"],
+                "source": item["source"],
+                "raw_command": str(raw_command),
+            },
+        )
+        return item
 
     def log(self, message: str) -> None:
         supervisor_log_line(self.state, message)
@@ -78,26 +111,6 @@ class CliSupervisor:
         )
         return note
 
-    def read_note_text(self, initial_text: str | None = None) -> str | None:
-        if initial_text and initial_text.strip():
-            return initial_text.strip()
-        print(
-            "Enter symmetric note text. End with a line containing only ---",
-            file=self.output_stream,
-            flush=True,
-        )
-        lines: list[str] = []
-        while True:
-            line = self.input_stream.readline()
-            if line == "":
-                break
-            stripped = line.rstrip("\n")
-            if stripped.strip() == "---":
-                break
-            lines.append(stripped)
-        note_text = "\n".join(lines).strip()
-        return note_text or None
-
     def status_lines(self) -> list[str]:
         turn = current_turn(self.state)
         package = current_execution_package(self.state)
@@ -116,6 +129,9 @@ class CliSupervisor:
             f"Read-only violations: {len(self.state.get('read_only_violations', []))}",
             f"Notes queued/active: {len(self.state['notes'])}",
         ]
+        control = self.state.get("runtime", {}).get("control", {})
+        if control.get("base_url"):
+            lines.append(f"Control API: {control['base_url']}")
         if package:
             lines.extend(
                 [
@@ -285,12 +301,11 @@ class CliSupervisor:
                 self.log("No later phase remains, so no new symmetric note can be queued.")
                 return None
             inline_text = command[len("note both") :].strip()
-            note_text = await asyncio.to_thread(self.read_note_text, inline_text)
-            if not note_text:
-                self.log("Empty note discarded.")
+            if not inline_text:
+                self.log("Usage: note both <text>. In CLI mode, plain 'note both' opens multiline capture until ---.")
                 return None
             note = self.create_note(
-                text=note_text,
+                text=inline_text,
                 applies_from_turn=len(self.state["turns"]) + 1,
                 applies_from_phase=next_phase,
             )
@@ -309,24 +324,51 @@ class CliSupervisor:
         self.log(f"Unknown command: {command}")
         return None
 
-    def _poll_running_command_sync(self, *, timeout: float) -> str | None:
-        ready, _, _ = select.select([self.input_stream], [], [], timeout)
-        if not ready:
+    def emit_boundary_prompt(self) -> None:
+        return
+
+    def _get_command_sync(self, *, timeout: float | None) -> dict[str, Any] | None:
+        try:
+            if timeout is None:
+                return self.command_queue.get()
+            return self.command_queue.get(timeout=timeout)
+        except queue.Empty:
             return None
-        raw_command = self.input_stream.readline()
-        if raw_command == "":
-            return None
-        return raw_command
+
+    async def _next_command(self, *, timeout: float | None) -> dict[str, Any] | None:
+        return await asyncio.to_thread(self._get_command_sync, timeout=timeout)
+
+    async def _consume_command(
+        self,
+        *,
+        mode: str,
+        next_phase: str | None,
+        item: dict[str, Any],
+    ) -> str | None:
+        action = await self.handle_command(
+            mode=mode,
+            next_phase=next_phase,
+            raw_command=str(item.get("raw_command", "")),
+        )
+        write_supervisor_event(
+            self.state,
+            {
+                "type": "command-processed",
+                "timestamp": utc_timestamp_precise(),
+                "request_id": item.get("request_id", ""),
+                "source": item.get("source", ""),
+                "mode": mode,
+                "raw_command": str(item.get("raw_command", "")),
+                "action": action or "",
+            },
+        )
+        return action
 
     async def poll_running_command(self, *, timeout: float, next_phase: str | None) -> str | None:
-        raw_command = await asyncio.to_thread(self._poll_running_command_sync, timeout=timeout)
-        if raw_command is None:
+        item = await self._next_command(timeout=timeout)
+        if item is None:
             return None
-        return await self.handle_command(mode="running", next_phase=next_phase, raw_command=raw_command)
-
-    def _read_boundary_command_sync(self) -> str:
-        print("> ", end="", file=self.output_stream, flush=True)
-        return self.input_stream.readline()
+        return await self._consume_command(mode="running", next_phase=next_phase, item=item)
 
     async def pause_for_boundary(self, *, label: str, next_phase: str | None) -> None:
         self.log(label)
@@ -338,11 +380,76 @@ class CliSupervisor:
             "Boundary commands: continue, status, tail claude, tail codex, inspect claude, inspect codex, show final-plan, show package, show diff, show manifest, note both, abort",
         )
         while True:
-            raw_command = await asyncio.to_thread(self._read_boundary_command_sync)
-            if raw_command == "":
+            self.emit_boundary_prompt()
+            item = await self._next_command(timeout=None)
+            if item is None:
                 continue
-            action = await self.handle_command(mode="boundary", next_phase=next_phase, raw_command=raw_command)
+            action = await self._consume_command(mode="boundary", next_phase=next_phase, item=item)
             if action == "continue":
                 return
             if action == "abort":
                 raise KeyboardInterrupt("Supervisor aborted the live run.")
+
+
+class CliSupervisor(QueueSupervisor):
+    def __init__(
+        self,
+        state: dict[str, Any],
+        transport: Any,
+        *,
+        input_stream: TextIO | None = None,
+        output_stream: TextIO | None = None,
+    ) -> None:
+        super().__init__(state, transport, output_stream=output_stream)
+        self.input_stream = input_stream or sys.stdin
+        self._stop_event = threading.Event()
+        self._input_thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self._input_thread and self._input_thread.is_alive():
+            return
+        self._stop_event.clear()
+        self._input_thread = threading.Thread(
+            target=self._stdin_loop,
+            name="peer-forge-live-stdin",
+            daemon=True,
+        )
+        self._input_thread.start()
+
+    def shutdown(self) -> None:
+        self._stop_event.set()
+
+    def emit_boundary_prompt(self) -> None:
+        print("> ", end="", file=self.output_stream, flush=True)
+
+    def _read_multiline_note(self) -> str | None:
+        print(
+            "Enter symmetric note text. End with a line containing only ---",
+            file=self.output_stream,
+            flush=True,
+        )
+        lines: list[str] = []
+        while not self._stop_event.is_set():
+            line = self.input_stream.readline()
+            if line == "":
+                break
+            stripped = line.rstrip("\n")
+            if stripped.strip() == "---":
+                break
+            lines.append(stripped)
+        note_text = "\n".join(lines).strip()
+        return note_text or None
+
+    def _stdin_loop(self) -> None:
+        while not self._stop_event.is_set():
+            raw_command = self.input_stream.readline()
+            if raw_command == "":
+                return
+            command = raw_command.rstrip("\n")
+            if command.strip().lower() == "note both":
+                note_text = self._read_multiline_note()
+                if not note_text:
+                    self.log("Empty note discarded.")
+                    continue
+                command = f"note both {note_text}"
+            self.submit_command(command, source="cli")
