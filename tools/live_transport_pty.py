@@ -9,6 +9,7 @@ import subprocess
 from typing import Any
 
 from live_state import append_text, raw_log_path, read_file_tail, read_bytes_from, record_agent_output
+from peer_consensus import utc_timestamp_precise
 
 
 class PtyTransport:
@@ -20,6 +21,13 @@ class PtyTransport:
 
     def ensure_available(self) -> None:
         return
+
+    def _refresh_agent_process_state(self, agent: str) -> None:
+        proc = self.processes.get(agent)
+        if proc is None:
+            return
+        returncode = proc.poll()
+        self.state["agents"][agent]["exit_code"] = returncode
 
     def start_agent(self, agent: str, *, cwd: Path, command: list[str]) -> None:
         master_fd, slave_fd = os.openpty()
@@ -45,6 +53,9 @@ class PtyTransport:
         self.state["agents"][agent]["pane_id"] = ""
         self.state["agents"][agent]["transport_kind"] = "pty"
         self.state["agents"][agent]["transport_ref"] = str(proc.pid)
+        self.state["agents"][agent]["pid"] = proc.pid
+        self.state["agents"][agent]["started_at"] = utc_timestamp_precise()
+        self.state["agents"][agent]["exit_code"] = None
 
     def _send_prompt_sync(self, agent: str, text: str) -> None:
         master_fd = self.master_fds[agent]
@@ -99,6 +110,7 @@ class PtyTransport:
         proc = self.processes.get(agent)
         if proc is None:
             return "pty=missing"
+        self._refresh_agent_process_state(agent)
         status = "running" if proc.poll() is None else f"exit={proc.returncode}"
         return f"pid={proc.pid} {status}"
 
@@ -126,6 +138,8 @@ class PtyTransport:
                         proc.kill()
                     except OSError:
                         pass
+        for agent in list(self.processes):
+            self._refresh_agent_process_state(agent)
         for master_fd in self.master_fds.values():
             try:
                 os.close(master_fd)

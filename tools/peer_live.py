@@ -4,7 +4,11 @@ from __future__ import annotations
 import asyncio
 import argparse
 import json
+import os
 from pathlib import Path
+import shlex
+import signal
+import subprocess
 import sys
 import time
 import traceback
@@ -34,6 +38,7 @@ from live_state import (
     package_manifest_path,
     persist_apply_attempt,
     persist_report,
+    process_runtime_state,
     report_path,
     save_state,
     state_path_from_run_dir,
@@ -63,6 +68,9 @@ from peer_consensus import (
 CONTROL_READY_TIMEOUT_SECONDS = 30.0
 CONTROL_READY_POLL_SECONDS = 0.25
 CONTROL_HEALTH_TIMEOUT_SECONDS = 1.5
+STOP_WAIT_TIMEOUT_SECONDS = 10.0
+STOP_WAIT_POLL_SECONDS = 0.25
+TERMINAL_RUN_STATUSES = {"approved", "needs-attention", "failed", "aborted"}
 
 
 def parse_args() -> argparse.Namespace:
@@ -70,6 +78,10 @@ def parse_args() -> argparse.Namespace:
         return parse_serve_args(sys.argv[2:])
     if len(sys.argv) > 1 and sys.argv[1] == "resume":
         return parse_resume_args(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == "status":
+        return parse_status_args(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == "stop":
+        return parse_stop_args(sys.argv[2:])
     if len(sys.argv) > 1 and sys.argv[1] == "apply":
         return parse_apply_args(sys.argv[2:])
     return parse_start_args(sys.argv[1:])
@@ -194,6 +206,35 @@ def parse_resume_args(argv: list[str]) -> argparse.Namespace:
         "--print-control-token",
         action="store_true",
         help="Explicitly print the local control API token in logs or detached JSON output.",
+    )
+    return parser.parse_args(argv)
+
+
+def parse_status_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Show the current lifecycle status of an existing peer-forge-live run.")
+    parser.set_defaults(command="status")
+    parser.add_argument("--state-file", required=True, help="Path to an existing live run state.json file.")
+    parser.add_argument(
+        "--open-ui",
+        action="store_true",
+        help="Open the local live Web UI in the default browser if the control server is currently reachable.",
+    )
+    parser.add_argument(
+        "--print-control-token",
+        action="store_true",
+        help="Include the local control API token in the status JSON output.",
+    )
+    return parser.parse_args(argv)
+
+
+def parse_stop_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Stop a detached pty-backed peer-forge-live run.")
+    parser.set_defaults(command="stop")
+    parser.add_argument("--state-file", required=True, help="Path to an existing live run state.json file.")
+    parser.add_argument(
+        "--print-control-token",
+        action="store_true",
+        help="Include the local control API token in the stop result JSON output.",
     )
     return parser.parse_args(argv)
 
@@ -450,6 +491,207 @@ def log_control_runtime(state: dict[str, object]) -> None:
         supervisor_log_line(state, f"Control token: {endpoints['control_token'] or '(empty)'}")
 
 
+def owner_pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def lifecycle_command(state: dict[str, Any], subcommand: str) -> str:
+    launcher = Path(state.get("tool_repo_root", "")).resolve() / "bin" / "peer-forge-live"
+    command = [str(launcher), subcommand, "--state-file", str(Path(state["state_file"]).resolve())]
+    return " ".join(shlex.quote(part) for part in command)
+
+
+def refresh_owner_process(state: dict[str, Any], *, persist: bool = True) -> dict[str, Any]:
+    process = process_runtime_state(state)
+    pid = int(process.get("owner_pid", 0) or 0)
+    status = str(state.get("status", "") or "")
+    if process.get("owner_exit_code") is not None:
+        alive = False
+    elif process.get("stopped_at", "") and status in TERMINAL_RUN_STATUSES:
+        alive = False
+    else:
+        alive = owner_pid_alive(pid)
+    changed = False
+    if bool(process.get("owner_alive", False)) != alive:
+        process["owner_alive"] = alive
+        changed = True
+    if alive and pid > 0:
+        process["owner_last_seen_at"] = utc_timestamp_precise()
+        changed = True
+    elif not alive and pid > 0 and not process.get("stopped_at", ""):
+        process["stopped_at"] = utc_timestamp_precise()
+        changed = True
+    if changed and persist:
+        save_state(state)
+    return process
+
+
+def mark_owner_started(state: dict[str, Any], pid: int) -> None:
+    process = process_runtime_state(state)
+    now = utc_timestamp_precise()
+    process["owner_pid"] = int(pid)
+    process["owner_started_at"] = now
+    process["owner_last_seen_at"] = now
+    process["owner_alive"] = True
+    process["owner_exit_code"] = None
+    process["stopped_at"] = ""
+    save_state(state)
+    write_supervisor_event(
+        state,
+        {
+            "type": "owner-process-started",
+            "timestamp": now,
+            "mode": process.get("mode", ""),
+            "owner_pid": int(pid),
+        },
+    )
+
+
+def mark_owner_stopped(state: dict[str, Any], *, exit_code: int | None) -> None:
+    process = process_runtime_state(state)
+    now = utc_timestamp_precise()
+    process["owner_alive"] = False
+    process["owner_exit_code"] = exit_code
+    process["owner_last_seen_at"] = now
+    if not process.get("stopped_at", ""):
+        process["stopped_at"] = now
+    save_state(state)
+    write_supervisor_event(
+        state,
+        {
+            "type": "owner-process-stopped",
+            "timestamp": now,
+            "mode": process.get("mode", ""),
+            "owner_pid": int(process.get("owner_pid", 0) or 0),
+            "owner_exit_code": exit_code,
+        },
+    )
+
+
+def request_owner_stop(state: dict[str, Any], *, stop_signal: str) -> None:
+    process = process_runtime_state(state)
+    process["stop_requested_at"] = utc_timestamp_precise()
+    process["stop_signal"] = stop_signal
+    save_state(state)
+    write_supervisor_event(
+        state,
+        {
+            "type": "owner-stop-requested",
+            "timestamp": process["stop_requested_at"],
+            "mode": process.get("mode", ""),
+            "owner_pid": int(process.get("owner_pid", 0) or 0),
+            "stop_signal": stop_signal,
+        },
+    )
+
+
+def reconcile_detached_owner_state(state: dict[str, Any]) -> dict[str, Any]:
+    process = refresh_owner_process(state, persist=False)
+    mode = str(process.get("mode", "") or "")
+    pid = int(process.get("owner_pid", 0) or 0)
+    alive = bool(process.get("owner_alive", False))
+    status = str(state.get("status", "") or "")
+    changed = False
+    if mode != "pty-detached" or pid <= 0 or alive:
+        if process.get("stopped_at", "") and status in TERMINAL_RUN_STATUSES:
+            changed = True
+        if changed:
+            save_state(state)
+        return process
+    if not process.get("stopped_at", ""):
+        process["stopped_at"] = utc_timestamp_precise()
+        changed = True
+    if status in {"starting", "running"}:
+        detail = "detached-owner-stopped" if process.get("stop_requested_at", "") else "detached-owner-exited"
+        resolution = "abort" if process.get("stop_requested_at", "") else "error"
+        clear_boundary_state(state, resolution=resolution)
+        changed = update_run_status(
+            state,
+            "aborted" if process.get("stop_requested_at", "") else "failed",
+            detail=detail,
+        ) or changed
+        if process.get("stop_requested_at", ""):
+            state["summary"]["abort_reason"] = state["summary"].get("abort_reason") or "Detached owner process stopped."
+        else:
+            state["summary"]["error"] = state["summary"].get("error") or "Detached PTY owner process is not running."
+        save_state(state)
+        persist_report(state)
+        return process
+    if changed:
+        save_state(state)
+    return process
+
+
+def spawn_detached_owner(state: dict[str, Any]) -> subprocess.Popen[bytes]:
+    state_file = Path(state["state_file"]).resolve()
+    raw_log_path = Path(state["logs"]["supervisor_raw"])
+    raw_log_path.parent.mkdir(parents=True, exist_ok=True)
+    command = build_supervisor_command(state_file)
+    with raw_log_path.open("ab") as raw_log, open(os.devnull, "rb") as devnull:
+        return subprocess.Popen(
+            command,
+            cwd=str(Path(state["run_dir"]).resolve()),
+            stdin=devnull,
+            stdout=raw_log,
+            stderr=raw_log,
+            close_fds=True,
+            start_new_session=True,
+        )
+
+
+def build_status_payload(
+    state: dict[str, Any],
+    *,
+    include_token: bool,
+) -> dict[str, Any]:
+    process = process_runtime_state(state)
+    endpoints = control_runtime_endpoints(state)
+    payload = {
+        "run_id": state["run_id"],
+        "status": state.get("status", ""),
+        "current_phase": state.get("current_phase", ""),
+        "session_name": state.get("session_name", ""),
+        "state_file": str(Path(state["state_file"]).resolve()),
+        "run_dir": str(Path(state["run_dir"]).resolve()),
+        "transport": state.get("runtime", {}).get("transport", ""),
+        "process_mode": process.get("mode", ""),
+        "owner_pid": int(process.get("owner_pid", 0) or 0),
+        "owner_alive": bool(process.get("owner_alive", False)),
+        "owner_exit_code": process.get("owner_exit_code"),
+        "owner_started_at": process.get("owner_started_at", ""),
+        "owner_last_seen_at": process.get("owner_last_seen_at", ""),
+        "stop_requested_at": process.get("stop_requested_at", ""),
+        "stopped_at": process.get("stopped_at", ""),
+        "stop_signal": process.get("stop_signal", ""),
+        "control_url": endpoints["control_url"],
+        "events_stream_url": endpoints["events_stream_url"],
+        "web_url": endpoints["web_url"],
+        "status_command": lifecycle_command(state, "status"),
+    }
+    if state.get("runtime", {}).get("transport") == "tmux":
+        payload["attach"] = f"tmux attach-session -t {state['session_name']}"
+    if process.get("mode", "") == "pty-detached":
+        payload["stop_command"] = lifecycle_command(state, "stop")
+    if include_token:
+        payload["control_token"] = endpoints["control_token"]
+    return payload
+
+
+def should_process_open_ui(state: dict[str, Any]) -> bool:
+    process = process_runtime_state(state)
+    return process.get("mode", "") != "pty-detached"
+
+
 def start_mode(args: argparse.Namespace) -> int:
     ensure_cli("claude")
     ensure_cli("codex")
@@ -462,8 +704,6 @@ def start_mode(args: argparse.Namespace) -> int:
     run_id = f"{utc_now()}-{uuid.uuid4().hex[:8]}"
     run_dir = run_root / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
-    if args.transport == "pty" and args.no_attach:
-        raise SystemExit("--no-attach is not supported with --transport pty yet.")
     session_name = args.session_name or (
         f"peer-forge-live-{run_id[-8:]}" if args.transport == "tmux" else f"peer-forge-live-local-{run_id[-8:]}"
     )
@@ -567,6 +807,18 @@ def start_mode(args: argparse.Namespace) -> int:
         transport.attach(session_name)
         return 0
 
+    if args.no_attach:
+        owner = spawn_detached_owner(state)
+        mark_owner_started(state, owner.pid)
+        latest_state, endpoints = wait_for_control_ready(state_path_from_run_dir(run_dir))
+        output_state = latest_state or load_state(state_path_from_run_dir(run_dir))
+        reconcile_detached_owner_state(output_state)
+        output = build_status_payload(output_state, include_token=bool(args.print_control_token))
+        if args.open_ui:
+            maybe_open_web_ui(endpoints, stream=sys.stderr)
+        print(json.dumps(output, indent=2, ensure_ascii=True))
+        return 0
+
     api_server = LiveControlServer(state, supervisor)
     try:
         supervisor.start()
@@ -594,7 +846,7 @@ def start_mode(args: argparse.Namespace) -> int:
         supervisor_log_line(state, f"Supervisor running inline for {state['run_id']} using pty transport.")
         supervisor_log_line(state, "This is the live peer-forge protocol with plan, execution, review, and signoff phases.")
         log_control_runtime(state)
-        if control_preferences(state)["open_ui"]:
+        if control_preferences(state)["open_ui"] and should_process_open_ui(state):
             maybe_open_web_ui(
                 control_runtime_endpoints(state),
                 log_line=lambda message: supervisor_log_line(state, message),
@@ -692,6 +944,71 @@ def resume_mode(args: argparse.Namespace) -> int:
         if args.open_ui:
             maybe_open_web_ui(endpoints, stream=sys.stderr)
     transport.attach(session_name)
+    return 0
+
+
+def status_mode(args: argparse.Namespace) -> int:
+    state_file = Path(args.state_file).resolve()
+    if not state_file.exists():
+        raise SystemExit(f"State file does not exist: {state_file}")
+    state = load_state(state_file)
+    reconcile_detached_owner_state(state)
+    endpoints = control_runtime_endpoints(state)
+    payload = build_status_payload(state, include_token=bool(args.print_control_token))
+    if args.open_ui and control_health_ok(endpoints["control_url"], endpoints["control_token"]):
+        maybe_open_web_ui(
+            {
+                "web_url": payload["web_url"],
+                "control_url": payload["control_url"],
+                "events_stream_url": payload["events_stream_url"],
+            },
+            stream=sys.stderr,
+        )
+    print(json.dumps(payload, indent=2, ensure_ascii=True))
+    return 0
+
+
+def stop_mode(args: argparse.Namespace) -> int:
+    state_file = Path(args.state_file).resolve()
+    if not state_file.exists():
+        raise SystemExit(f"State file does not exist: {state_file}")
+    state = load_state(state_file)
+    process = reconcile_detached_owner_state(state)
+    if state.get("runtime", {}).get("transport") != "pty" or process.get("mode", "") != "pty-detached":
+        raise SystemExit("stop currently supports only detached pty-backed live runs.")
+    pid = int(process.get("owner_pid", 0) or 0)
+    if pid <= 0 or not bool(process.get("owner_alive", False)):
+        print(json.dumps(build_status_payload(state, include_token=bool(args.print_control_token)), indent=2, ensure_ascii=True))
+        return 0
+
+    request_owner_stop(state, stop_signal="SIGTERM")
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+
+    deadline = time.monotonic() + STOP_WAIT_TIMEOUT_SECONDS
+    final_state = state
+    while time.monotonic() < deadline:
+        try:
+            final_state = load_state(state_file)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            time.sleep(STOP_WAIT_POLL_SECONDS)
+            continue
+        process = reconcile_detached_owner_state(final_state)
+        if not bool(process.get("owner_alive", False)):
+            break
+        time.sleep(STOP_WAIT_POLL_SECONDS)
+
+    final_state = load_state(state_file)
+    reconcile_detached_owner_state(final_state)
+    payload = build_status_payload(final_state, include_token=bool(args.print_control_token))
+    if bool(process_runtime_state(final_state).get("owner_alive", False)):
+        payload["stop_timeout"] = True
+        print(json.dumps(payload, indent=2, ensure_ascii=True))
+        return 1
+    payload["stop_timeout"] = False
+    print(json.dumps(payload, indent=2, ensure_ascii=True))
     return 0
 
 
@@ -964,8 +1281,7 @@ def apply_mode(args: argparse.Namespace) -> int:
 def serve_mode(args: argparse.Namespace) -> int:
     state_file = Path(args.state_file).resolve()
     state = load_state(state_file)
-    if state.get("runtime", {}).get("transport") != "tmux":
-        raise SystemExit("serve is only valid for tmux-backed live runs.")
+    transport_name = str(state.get("runtime", {}).get("transport", "tmux") or "tmux")
     control = state.get("runtime", {}).get("control", {})
     ensure_control_runtime(
         state,
@@ -973,34 +1289,127 @@ def serve_mode(args: argparse.Namespace) -> int:
         port=int(control.get("port", 0) or 0),
     )
     save_state(state)
-    transport = TmuxTransport(state)
+    if transport_name == "tmux":
+        transport = TmuxTransport(state)
+        transport.ensure_available()
+        supervisor = CliSupervisor(state, transport)
+        supervisor.start()
+        api_server = LiveControlServer(state, supervisor)
+        api_server.start()
+        machine = ProtocolStateMachine(state)
+        runloop = RunLoop(state, transport=transport, supervisor=supervisor, machine=machine)
+        supervisor_log_line(state, f"Supervisor attached to {state['run_id']} in session {state['session_name']}.")
+        supervisor_log_line(state, "This is the live peer-forge protocol with plan, execution, review, and signoff phases.")
+        log_control_runtime(state)
+        if control_preferences(state)["open_ui"] and should_process_open_ui(state):
+            maybe_open_web_ui(
+                control_runtime_endpoints(state),
+                log_line=lambda message: supervisor_log_line(state, message),
+            )
+        try:
+            asyncio.run(runloop.serve())
+            return 0
+        except KeyboardInterrupt as exc:
+            clear_boundary_state(state, resolution="abort")
+            update_run_status(state, "aborted", detail=str(exc))
+            state["summary"]["abort_reason"] = str(exc)
+            save_state(state)
+            persist_report(state)
+            supervisor_log_line(state, f"Live run aborted. Report: {report_path(state)}")
+            return 130
+        except Exception as exc:
+            clear_boundary_state(state, resolution="error")
+            update_run_status(state, "failed", detail=f"{type(exc).__name__}: {exc}")
+            state["summary"]["error"] = f"{type(exc).__name__}: {exc}"
+            traceback_path = Path(state["run_dir"]) / "failure-traceback.txt"
+            write_text(traceback_path, "".join(traceback.format_exception(exc)))
+            state["summary"]["traceback_file"] = str(traceback_path)
+            save_state(state)
+            persist_report(state)
+            supervisor_log_line(state, f"Live run failed: {type(exc).__name__}: {exc}")
+            return 1
+        finally:
+            api_server.shutdown()
+            supervisor.shutdown()
+
+    if transport_name != "pty":
+        raise SystemExit(f"Unsupported transport in state.json: {transport_name}")
+
+    process = process_runtime_state(state)
+    if process.get("mode", "") != "pty-detached":
+        raise SystemExit("serve for pty transport currently supports only detached owner mode.")
+
+    transport = PtyTransport(state)
     transport.ensure_available()
-    supervisor = CliSupervisor(state, transport)
-    supervisor.start()
-    api_server = LiveControlServer(state, supervisor)
-    api_server.start()
+    supervisor = QueueSupervisor(state, transport)
     machine = ProtocolStateMachine(state)
     runloop = RunLoop(state, transport=transport, supervisor=supervisor, machine=machine)
-    supervisor_log_line(state, f"Supervisor attached to {state['run_id']} in session {state['session_name']}.")
-    supervisor_log_line(state, "This is the live peer-forge protocol with plan, execution, review, and signoff phases.")
-    log_control_runtime(state)
-    if control_preferences(state)["open_ui"]:
-        maybe_open_web_ui(
-            control_runtime_endpoints(state),
-            log_line=lambda message: supervisor_log_line(state, message),
-        )
+    current_turn = state["turns"][-1] if state.get("turns") else machine.create_initial_turn()
+    if current_turn["phase"] != "plan-initial" or current_turn["status"] != "pending":
+        raise SystemExit("Detached pty serve cannot resume an existing run. Use status/stop and start a fresh run.")
+    claude_prompt_path = Path(current_turn["agents"]["claude"]["session_prompt_path"])
+    codex_prompt_path = Path(current_turn["agents"]["codex"]["session_prompt_path"])
+    api_server = LiveControlServer(state, supervisor)
+    exit_code = 0
+    received_signal = {"name": ""}
+
+    def _signal_handler(signum: int, _frame: Any) -> None:
+        try:
+            signal_name = signal.Signals(signum).name
+        except ValueError:
+            signal_name = f"signal-{signum}"
+        received_signal["name"] = signal_name
+        raise KeyboardInterrupt(f"Received {signal_name}")
+
+    previous_sigint = signal.getsignal(signal.SIGINT)
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+    signal.signal(signal.SIGINT, _signal_handler)
+    signal.signal(signal.SIGTERM, _signal_handler)
     try:
+        mark_owner_started(state, os.getpid())
+        supervisor.start()
+        api_server.start()
+        transport.start_agent(
+            "claude",
+            cwd=Path(state["agents"]["claude"]["workspace"]),
+            command=build_claude_command(
+                model=state.get("claude_model"),
+                bare=bool(state.get("claude_bare", False)),
+                prompt_path=claude_prompt_path,
+            ),
+        )
+        transport.start_agent(
+            "codex",
+            cwd=Path(state["agents"]["codex"]["workspace"]),
+            command=build_codex_command(
+                workspace=Path(state["agents"]["codex"]["workspace"]),
+                model=state.get("codex_model"),
+                prompt_path=codex_prompt_path,
+            ),
+        )
+        save_state(state)
+        supervisor_log_line(state, f"Detached PTY owner running for {state['run_id']} (pid {os.getpid()}).")
+        supervisor_log_line(state, "This is the live peer-forge protocol with plan, execution, review, and signoff phases.")
+        log_control_runtime(state)
+        if control_preferences(state)["open_ui"] and should_process_open_ui(state):
+            maybe_open_web_ui(
+                control_runtime_endpoints(state),
+                log_line=lambda message: supervisor_log_line(state, message),
+            )
         asyncio.run(runloop.serve())
+        exit_code = 0
         return 0
     except KeyboardInterrupt as exc:
+        exit_code = 130
         clear_boundary_state(state, resolution="abort")
-        update_run_status(state, "aborted", detail=str(exc))
+        update_run_status(state, "aborted", detail=received_signal["name"] or str(exc))
         state["summary"]["abort_reason"] = str(exc)
         save_state(state)
         persist_report(state)
         supervisor_log_line(state, f"Live run aborted. Report: {report_path(state)}")
         return 130
     except Exception as exc:
+        exit_code = 1
         clear_boundary_state(state, resolution="error")
         update_run_status(state, "failed", detail=f"{type(exc).__name__}: {exc}")
         state["summary"]["error"] = f"{type(exc).__name__}: {exc}"
@@ -1012,8 +1421,14 @@ def serve_mode(args: argparse.Namespace) -> int:
         supervisor_log_line(state, f"Live run failed: {type(exc).__name__}: {exc}")
         return 1
     finally:
+        signal.signal(signal.SIGINT, previous_sigint)
+        signal.signal(signal.SIGTERM, previous_sigterm)
         api_server.shutdown()
         supervisor.shutdown()
+        asyncio.run(transport.shutdown())
+        mark_owner_stopped(state, exit_code=exit_code)
+        if state.get("status") in TERMINAL_RUN_STATUSES:
+            persist_report(state)
 
 
 def main() -> int:
@@ -1022,6 +1437,10 @@ def main() -> int:
         return serve_mode(args)
     if getattr(args, "command", "") == "resume":
         return resume_mode(args)
+    if getattr(args, "command", "") == "status":
+        return status_mode(args)
+    if getattr(args, "command", "") == "stop":
+        return stop_mode(args)
     if getattr(args, "command", "") == "apply":
         return apply_mode(args)
     return start_mode(args)

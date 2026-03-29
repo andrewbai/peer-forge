@@ -131,6 +131,16 @@ def normalize_state(state: dict[str, Any]) -> None:
     control.setdefault("web_url", "")
     control.setdefault("open_ui", False)
     control.setdefault("print_control_token", False)
+    process = state["runtime"].setdefault("process", {})
+    process.setdefault("mode", "tmux")
+    process.setdefault("owner_pid", 0)
+    process.setdefault("owner_started_at", "")
+    process.setdefault("owner_last_seen_at", "")
+    process.setdefault("owner_alive", False)
+    process.setdefault("owner_exit_code", None)
+    process.setdefault("stop_requested_at", "")
+    process.setdefault("stopped_at", "")
+    process.setdefault("stop_signal", "")
     boundary = state["runtime"].setdefault("boundary", {})
     boundary.setdefault("active", False)
     boundary.setdefault("label", "")
@@ -146,6 +156,9 @@ def normalize_state(state: dict[str, Any]) -> None:
         state["agents"][agent].setdefault("raw_log_path", "")
         state["agents"][agent].setdefault("stream_offset", 0)
         state["agents"][agent].setdefault("last_activity_at", "")
+        state["agents"][agent].setdefault("pid", 0)
+        state["agents"][agent].setdefault("started_at", "")
+        state["agents"][agent].setdefault("exit_code", None)
     state["agents"].setdefault("supervisor", {"pane_id": ""})
 
 
@@ -301,6 +314,21 @@ def boundary_runtime_state(state: dict[str, Any]) -> dict[str, Any]:
     boundary.setdefault("entered_at", "")
     boundary.setdefault("allowed_commands", [])
     return boundary
+
+
+def process_runtime_state(state: dict[str, Any]) -> dict[str, Any]:
+    runtime = state.setdefault("runtime", {})
+    process = runtime.setdefault("process", {})
+    process.setdefault("mode", "tmux")
+    process.setdefault("owner_pid", 0)
+    process.setdefault("owner_started_at", "")
+    process.setdefault("owner_last_seen_at", "")
+    process.setdefault("owner_alive", False)
+    process.setdefault("owner_exit_code", None)
+    process.setdefault("stop_requested_at", "")
+    process.setdefault("stopped_at", "")
+    process.setdefault("stop_signal", "")
+    return process
 
 
 def allowed_supervisor_commands(mode: str, *, next_phase: str | None = None) -> list[str]:
@@ -480,6 +508,7 @@ def current_diff_payload(state: dict[str, Any], *, max_lines: int = 300) -> dict
 def build_dashboard_snapshot(state: dict[str, Any]) -> dict[str, Any]:
     runtime = state.get("runtime", {})
     control = runtime.get("control", {}) if isinstance(runtime, dict) else {}
+    process = runtime.get("process", {}) if isinstance(runtime, dict) else {}
     boundary = dict(boundary_runtime_state(state))
     summary = state.get("summary", {})
     package_payload = current_execution_package_payload(state)
@@ -545,6 +574,16 @@ def build_dashboard_snapshot(state: dict[str, Any]) -> dict[str, Any]:
         "control": {
             "base_url": control.get("base_url", "") if isinstance(control, dict) else "",
             "events_stream_url": control.get("events_stream_url", "") if isinstance(control, dict) else "",
+            "web_url": control.get("web_url", "") if isinstance(control, dict) else "",
+        },
+        "process": {
+            "mode": process.get("mode", "") if isinstance(process, dict) else "",
+            "owner_pid": process.get("owner_pid", 0) if isinstance(process, dict) else 0,
+            "owner_started_at": process.get("owner_started_at", "") if isinstance(process, dict) else "",
+            "owner_last_seen_at": process.get("owner_last_seen_at", "") if isinstance(process, dict) else "",
+            "owner_alive": bool(process.get("owner_alive", False)) if isinstance(process, dict) else False,
+            "owner_exit_code": process.get("owner_exit_code") if isinstance(process, dict) else None,
+            "stop_requested_at": process.get("stop_requested_at", "") if isinstance(process, dict) else "",
         },
         "boundary": boundary,
         "summary": {
@@ -1241,6 +1280,21 @@ def initialize_state(args: argparse.Namespace, *, repo: Path, task: str, run_dir
                 "open_ui": bool(getattr(args, "open_ui", False)),
                 "print_control_token": bool(getattr(args, "print_control_token", False)),
             },
+            "process": {
+                "mode": (
+                    "pty-detached"
+                    if str(getattr(args, "transport", "tmux")) == "pty" and bool(getattr(args, "no_attach", False))
+                    else ("pty-inline" if str(getattr(args, "transport", "tmux")) == "pty" else "tmux")
+                ),
+                "owner_pid": 0,
+                "owner_started_at": "",
+                "owner_last_seen_at": "",
+                "owner_alive": False,
+                "owner_exit_code": None,
+                "stop_requested_at": "",
+                "stopped_at": "",
+                "stop_signal": "",
+            },
             "boundary": {
                 "active": False,
                 "label": "",
@@ -1269,6 +1323,9 @@ def initialize_state(args: argparse.Namespace, *, repo: Path, task: str, run_dir
                 "raw_log_path": str(run_dir / "panes" / "claude.raw.log"),
                 "stream_offset": 0,
                 "last_activity_at": "",
+                "pid": 0,
+                "started_at": "",
+                "exit_code": None,
             },
             "codex": {
                 "workspace": "",
@@ -1278,6 +1335,9 @@ def initialize_state(args: argparse.Namespace, *, repo: Path, task: str, run_dir
                 "raw_log_path": str(run_dir / "panes" / "codex.raw.log"),
                 "stream_offset": 0,
                 "last_activity_at": "",
+                "pid": 0,
+                "started_at": "",
+                "exit_code": None,
             },
             "supervisor": {
                 "pane_id": "",

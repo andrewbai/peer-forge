@@ -20,6 +20,7 @@ from live_state import (
     current_final_plan_path,
     current_turn,
     next_note_id,
+    process_runtime_state,
     package_diff_path,
     package_manifest_path,
     read_file_tail,
@@ -134,6 +135,16 @@ class QueueSupervisor:
         control = self.state.get("runtime", {}).get("control", {})
         if control.get("base_url"):
             lines.append(f"Control API: {control['base_url']}")
+        if control.get("web_url"):
+            lines.append(f"Web UI: {control['web_url']}")
+        process = process_runtime_state(self.state)
+        lines.append(
+            "Owner process: "
+            f"mode={process.get('mode', 'n/a')}, "
+            f"pid={process.get('owner_pid', 0) or 'n/a'}, "
+            f"alive={process.get('owner_alive', False)}, "
+            f"exit={process.get('owner_exit_code')}",
+        )
         boundary = self.state.get("runtime", {}).get("boundary", {})
         if boundary.get("active"):
             lines.append(

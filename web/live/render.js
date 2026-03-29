@@ -155,6 +155,14 @@ export function renderApp(root, state) {
   const run = dashboard?.run || {};
   const summary = dashboard?.summary || {};
   const boundary = dashboard?.boundary || {};
+  const process = dashboard?.process || {};
+  let ownerState = "n/a";
+  if (process.owner_pid) {
+    ownerState = process.owner_alive ? `pid ${process.owner_pid} alive` : `pid ${process.owner_pid} stopped`;
+    if (process.owner_exit_code !== null && process.owner_exit_code !== undefined) {
+      ownerState += ` (${process.owner_exit_code})`;
+    }
+  }
 
   root.querySelector("[data-connection-pill]").textContent = state.connection;
   root.querySelector("[data-connection-pill]").dataset.state = state.connection;
@@ -164,6 +172,8 @@ export function renderApp(root, state) {
   root.querySelector("[data-current-phase]").textContent = run.current_phase || "n/a";
   root.querySelector("[data-session-name]").textContent = run.session_name || "n/a";
   root.querySelector("[data-transport]").textContent = run.transport || "n/a";
+  root.querySelector("[data-process-mode]").textContent = process.mode || "n/a";
+  root.querySelector("[data-owner-state]").textContent = ownerState;
   root.querySelector("[data-selected-executor]").textContent = summary.selected_executor || "n/a";
   root.querySelector("[data-selected-reviewer]").textContent = summary.selected_reviewer || "n/a";
 

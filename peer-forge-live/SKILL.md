@@ -1,8 +1,8 @@
 ---
 name: peer-forge-live
 description: |
-  Run the live tmux-based Peer Forge workflow when the user wants to watch Claude Code and Codex
-  side by side in long-lived interactive sessions, supervise the process in real time, and keep the
+  Run the live Peer Forge workflow when the user wants to watch Claude Code and Codex
+  in long-lived interactive sessions, supervise the process in real time via browser or tmux, and keep the
   two agents symmetric and isolated across planning, execution, review, and signoff.
 ---
 
@@ -50,19 +50,34 @@ Phase order:
 - peer implementation review
 - bounded execution fix/signoff rounds
 
+Transport modes:
+- `--transport pty` (recommended): runs as a local background process, no tmux needed, browser-only supervision
+- `--transport tmux` (default): runs inside tmux panes, CLI + browser supervision
+
 ## Requirements
 
-- `tmux`
 - `claude`
 - `codex`
 - `python3`
 - `git`
+- `tmux` (only for `--transport tmux`)
 
 ## What To Run
 
 Always use the launcher layer, not a direct Python path.
 
-Global install:
+Recommended (detached PTY, no tmux):
+
+```bash
+~/.claude/skills/peer-forge/bin/peer-forge-live \
+  --repo . \
+  --task "用户的原始任务" \
+  --transport pty \
+  --no-attach \
+  --open-ui
+```
+
+Tmux mode (global install):
 
 ```bash
 ~/.claude/skills/peer-forge/bin/peer-forge-live \
@@ -78,6 +93,7 @@ If the current project vendors `peer-forge` locally:
 ./.claude/skills/peer-forge/bin/peer-forge-live \
   --repo . \
   --task "用户的原始任务" \
+  --transport pty \
   --no-attach \
   --open-ui
 ```
@@ -186,10 +202,25 @@ Important startup behavior:
 
 Detached browser flow:
 
-- `--no-attach` returns JSON with `run_id`, `session_name`, `run_dir`, `state_file`, `attach`, `control_url`, `events_stream_url`, and `web_url`.
+- `--no-attach` returns JSON with `run_id`, `session_name`, `run_dir`, `state_file`, `control_url`, `events_stream_url`, `web_url`, `process_mode`, `owner_pid`, `owner_alive`, `status_command`, and `stop_command`.
 - `--print-control-token` adds `control_token` to that JSON.
 - `--open-ui` best-effort opens `web_url` in the default browser once the local control server is ready.
-- Use the Web UI for timeline, artifacts, events, and boundary actions; keep tmux for trust prompts and raw pane inspection.
+- Use the Web UI for timeline, artifacts, events, and boundary actions.
+- Use `status --state-file ...` to check a detached run and `stop --state-file ...` to end it.
+- Use tmux (`--transport tmux`) only when you need CLI-native trust prompts and raw pane inspection.
+
+Lifecycle commands for detached PTY runs:
+
+```bash
+~/.claude/skills/peer-forge/bin/peer-forge-live status \
+  --state-file /path/to/state.json \
+  --open-ui
+```
+
+```bash
+~/.claude/skills/peer-forge/bin/peer-forge-live stop \
+  --state-file /path/to/state.json
+```
 
 ## Live Supervisor Commands
 

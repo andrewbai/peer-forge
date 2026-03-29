@@ -150,7 +150,18 @@ Live tmux mode:
   --task "Have Claude Code and Codex draft plans independently, cross-review, and converge while I supervise live."
 ```
 
-Recommended detached + browser-supervised startup:
+Recommended detached + browser-supervised startup (no tmux required):
+
+```bash
+~/.claude/skills/peer-forge/bin/peer-forge-live \
+  --repo . \
+  --task "Have Claude Code and Codex draft plans independently, cross-review, and converge while I supervise live." \
+  --transport pty \
+  --no-attach \
+  --open-ui
+```
+
+Tmux-based detached startup (requires tmux):
 
 ```bash
 ~/.claude/skills/peer-forge/bin/peer-forge-live \
@@ -177,6 +188,24 @@ Detached startup JSON now includes:
 - `events_stream_url`
 - `web_url`
 - `control_token` when `--print-control-token` is set
+- `process_mode` (`pty-detached`, `pty-inline`, or `tmux`)
+- `owner_pid` and `owner_alive` for detached PTY runs
+- `status_command` and `stop_command` for lifecycle management
+
+Check a detached PTY run:
+
+```bash
+~/.claude/skills/peer-forge/bin/peer-forge-live status \
+  --state-file /path/to/state.json \
+  --open-ui
+```
+
+Stop a detached PTY run:
+
+```bash
+~/.claude/skills/peer-forge/bin/peer-forge-live stop \
+  --state-file /path/to/state.json
+```
 
 `peer-forge-live` now starts Claude without `--bare` by default so Claude Max, OAuth, and keychain-backed auth continue to work in interactive live sessions.
 
@@ -297,10 +326,11 @@ Startup note:
 
 Recommended supervision path:
 
-1. Start with `--no-attach --open-ui`.
+1. Start with `--transport pty --no-attach --open-ui` (no tmux needed).
 2. Use `web_url` for the browser dashboard, event feed, artifacts, and boundary controls.
-3. Use `control_url` plus `control_token` only when you want direct API or SSE access outside the built-in UI.
-4. Keep tmux for CLI-native trust/bypass prompts and low-level pane inspection.
+3. Use `status --state-file ...` to check the run and `stop --state-file ...` to end it.
+4. Use `control_url` plus `control_token` only when you want direct API or SSE access outside the built-in UI.
+5. Use tmux (`--transport tmux`) only when you need CLI-native trust/bypass prompts and raw pane inspection.
 
 Inside the supervisor pane, the main commands are:
 
@@ -382,6 +412,7 @@ Manual smoke coverage for live startup and supervisor recovery is included in:
 - `scripts/live-smoke.sh`
 - `scripts/live-apply-smoke.sh`
 - `scripts/live-web-smoke.sh`
+- `scripts/live-pty-detached-smoke.sh`
 
 ## Artifacts
 

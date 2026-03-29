@@ -108,9 +108,22 @@ git --version
 
 ---
 
-## 4. 最常用的 3 个命令
+## 4. 最常用的命令
 
-### 4.1 启动 live run
+### 4.1 启动 live run（推荐：detached PTY + 浏览器）
+
+```bash
+~/.claude/skills/peer-forge/bin/peer-forge-live \
+  --repo . \
+  --task "让 Claude Code 和 Codex 独立出方案、互相 review，然后收敛到一个最终实现，我全程实时监督。" \
+  --transport pty \
+  --no-attach \
+  --open-ui
+```
+
+这条命令不需要 tmux。它会启动一个本地后台进程，自动打开浏览器监督页面。
+
+### 4.1b 启动 live run（tmux 模式）
 
 ```bash
 ~/.claude/skills/peer-forge/bin/peer-forge-live \
@@ -118,7 +131,22 @@ git --version
   --task "让 Claude Code 和 Codex 独立出方案、互相 review，然后收敛到一个最终实现，我全程实时监督。"
 ```
 
-### 4.2 恢复 / 重新附着已有 run
+### 4.2 查看 detached run 状态
+
+```bash
+~/.claude/skills/peer-forge/bin/peer-forge-live status \
+  --state-file /path/to/state.json \
+  --open-ui
+```
+
+### 4.3 停止 detached run
+
+```bash
+~/.claude/skills/peer-forge/bin/peer-forge-live stop \
+  --state-file /path/to/state.json
+```
+
+### 4.4 恢复 / 重新附着已有 tmux run
 
 ```bash
 ~/.claude/skills/peer-forge/bin/peer-forge-live resume \
@@ -220,7 +248,7 @@ apply 后自动 commit：
 
 ## 6. 推荐的第一次真实运行方式
 
-第一次建议你不要直接 attach，而是先走 detached + 浏览器监督。
+第一次建议你走 detached PTY + 浏览器监督，不需要 tmux。
 
 ```bash
 ~/.claude/skills/peer-forge/bin/peer-forge-live \
@@ -228,6 +256,7 @@ apply 后自动 commit：
   --task "你的真实任务" \
   --acceptance "不要改 public API" \
   --scope src \
+  --transport pty \
   --no-attach \
   --open-ui
 ```
@@ -235,32 +264,26 @@ apply 后自动 commit：
 它会打印一段 JSON，里面通常有：
 
 - `run_id`
-- `session_name`
-- `run_dir`
 - `state_file`
-- `attach`
 - `control_url`
 - `events_stream_url`
 - `web_url`
-
-如果你额外传了：
-
-```bash
---print-control-token
-```
-
-还会多一个：
-
-- `control_token`
+- `process_mode`（应该是 `pty-detached`）
+- `owner_pid`
+- `owner_alive`
+- `status_command`
+- `stop_command`
+如果你额外传了 `--print-control-token`，还会多一个 `control_token`。
 
 推荐顺序是：
 
-1. 先看浏览器是否已经打开 `web_url`
-2. 在 Web UI 里看 timeline / events / artifacts / boundary controls
-3. 需要处理 Claude / Codex 原生确认时，再 attach 进 tmux
+1. 浏览器自动打开了 `web_url`，直接在 Web UI 里看 timeline / events / artifacts / boundary controls
+2. 需要查看 run 状态时用 `status --state-file ...`
+3. 需要停止 run 时用 `stop --state-file ...`
 4. 需要自己调本地 API 时，再用 `control_url` + `control_token`
+5. 只有在需要 CLI 原生确认（trust / bypass）时，才考虑用 tmux 模式
 
-拿到之后：
+如果用的是 tmux 模式，拿到 JSON 后：
 
 ```bash
 tmux attach-session -t <session_name>
@@ -566,7 +589,32 @@ run 成功结束后，先不要急着 apply。
 
 ---
 
-## 11. 如何恢复一个被你关掉的 session
+## 11. 如何查看和管理 run
+
+### PTY detached 模式
+
+查看状态：
+
+```bash
+~/.claude/skills/peer-forge/bin/peer-forge-live status \
+  --state-file /path/to/state.json \
+  --open-ui
+```
+
+停止 run：
+
+```bash
+~/.claude/skills/peer-forge/bin/peer-forge-live stop \
+  --state-file /path/to/state.json
+```
+
+注意：
+
+- PTY detached 的 owner 进程如果死了，这次 run 基本就结束了，不能像 tmux 一样修复
+- `status` 会明确告诉你 `owner_alive` 是 true 还是 false
+- 如果 owner 意外死亡且 run 没有正常结束，状态会被标记为 `failed`
+
+### tmux 模式
 
 如果 tmux session 还在，只是你 detach 了：
 
@@ -580,20 +628,6 @@ tmux attach-session -t <session_name>
 ~/.claude/skills/peer-forge/bin/peer-forge-live resume \
   --state-file /path/to/state.json
 ```
-
-如果你不想立刻 attach：
-
-```bash
-~/.claude/skills/peer-forge/bin/peer-forge-live resume \
-  --state-file /path/to/state.json \
-  --no-attach
-```
-
-适合场景：
-
-- 你误关了 supervisor pane
-- 你想从另一个终端恢复
-- 你先修 pane，再决定是否 attach
 
 注意：
 
@@ -981,7 +1015,7 @@ peer-forge/<run-id>
 
 如果你现在就想跑一遍，照这个顺序：
 
-1. 启动
+1. 启动（推荐 PTY detached，不需要 tmux）
 
 ```bash
 ~/.claude/skills/peer-forge/bin/peer-forge-live \
@@ -989,41 +1023,53 @@ peer-forge/<run-id>
   --task "你的真实任务" \
   --acceptance "不要改 public API" \
   --scope src \
-  --no-attach
+  --transport pty \
+  --no-attach \
+  --open-ui
 ```
 
-2. attach
+2. 浏览器自动打开，在 Web UI 里操作
+
+3. 需要查看状态时：
 
 ```bash
-tmux attach-session -t <session_name>
+~/.claude/skills/peer-forge/bin/peer-forge-live status \
+  --state-file /path/to/state.json
 ```
 
-3. 在 supervisor 里常用：
+4. 在 Web UI 里常用：
 
 ```text
-status
+Status 按钮
+Continue 按钮（boundary 时可点）
+Note both 表单
 show final-plan
 show package
 show diff
 continue
 ```
 
-4. 如果需要提醒双方：
+5. 如果需要提醒双方，在 Web UI 的 note 表单里输入，或者用 CLI：
 
 ```text
-note both
-保留现有 public API，不要把这次任务扩展成接口重设计。
----
+note both 保留现有 public API，不要把这次任务扩展成接口重设计。
 ```
 
-5. run 完成后 preview：
+6. 需要停止 run 时：
+
+```bash
+~/.claude/skills/peer-forge/bin/peer-forge-live stop \
+  --state-file /path/to/state.json
+```
+
+7. run 完成后 preview：
 
 ```bash
 ~/.claude/skills/peer-forge/bin/peer-forge-live apply \
   --state-file /path/to/state.json
 ```
 
-6. 确认无误后 apply：
+8. 确认无误后 apply：
 
 ```bash
 ~/.claude/skills/peer-forge/bin/peer-forge-live apply \
@@ -1045,4 +1091,4 @@ note both
 
 它只服务一个目标：
 
-让你在 `v0.14.0` 上，完整跑通一次 live workflow，从启动一路到 apply。
+让你完整跑通一次 live workflow，从启动一路到 apply。支持 PTY detached（推荐）和 tmux 两种模式。

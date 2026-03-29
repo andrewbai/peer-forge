@@ -153,7 +153,18 @@ live tmux 模式：
   --task "让 Claude Code 和 Codex 独立出方案、互相 review，并且我在旁边实时监督。"
 ```
 
-推荐的 detached + 浏览器监督启动方式：
+推荐的 detached + 浏览器监督启动方式（不需要 tmux）：
+
+```bash
+~/.claude/skills/peer-forge/bin/peer-forge-live \
+  --repo . \
+  --task "让 Claude Code 和 Codex 独立出方案、互相 review，并且我在旁边实时监督。" \
+  --transport pty \
+  --no-attach \
+  --open-ui
+```
+
+基于 tmux 的 detached 启动方式（需要 tmux）：
 
 ```bash
 ~/.claude/skills/peer-forge/bin/peer-forge-live \
@@ -180,6 +191,24 @@ detached 启动输出的 JSON 现在会补充：
 - `events_stream_url`
 - `web_url`
 - 传了 `--print-control-token` 时额外给出 `control_token`
+- `process_mode`（`pty-detached`、`pty-inline` 或 `tmux`）
+- detached PTY run 的 `owner_pid` 和 `owner_alive`
+- 用于生命周期管理的 `status_command` 和 `stop_command`
+
+查看一个 detached PTY run 的状态：
+
+```bash
+~/.claude/skills/peer-forge/bin/peer-forge-live status \
+  --state-file /path/to/state.json \
+  --open-ui
+```
+
+停止一个 detached PTY run：
+
+```bash
+~/.claude/skills/peer-forge/bin/peer-forge-live stop \
+  --state-file /path/to/state.json
+```
 
 `peer-forge-live` 现在默认不会给 Claude 加 `--bare`，这样 Claude Max、OAuth 和 keychain 登录态在交互式 live session 里可以继续使用。
 
@@ -303,10 +332,11 @@ git --version
 
 推荐的监督路径：
 
-1. 用 `--no-attach --open-ui` 启动。
+1. 用 `--transport pty --no-attach --open-ui` 启动（不需要 tmux）。
 2. 浏览器打开 `web_url`，在 Web UI 里看时间线、事件流、产物和边界按钮。
-3. 只有在你要自己调 API / SSE 时，才使用 `control_url` 加 `control_token`。
-4. tmux 继续保留给原生 trust / bypass 确认，以及低层 pane 检查。
+3. 用 `status --state-file ...` 查看 run 状态，用 `stop --state-file ...` 停止 run。
+4. 只有在你要自己调 API / SSE 时，才使用 `control_url` 加 `control_token`。
+5. 需要 CLI 原生 trust / bypass 确认或原始 pane 检查时，再用 tmux（`--transport tmux`）。
 
 supervisor pane 里的主要命令：
 
@@ -388,6 +418,7 @@ apply 语义：
 - `scripts/live-smoke.sh`
 - `scripts/live-apply-smoke.sh`
 - `scripts/live-web-smoke.sh`
+- `scripts/live-pty-detached-smoke.sh`
 
 ## 运行产物
 
