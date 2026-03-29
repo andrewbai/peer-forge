@@ -83,12 +83,25 @@ def normalize_state(state: dict[str, Any]) -> None:
     state.setdefault("summary", {})
     state.setdefault("logs", {})
     state.setdefault("agents", {})
+    state.setdefault("runtime", {})
     state.setdefault("apply_attempts", [])
     state["summary"].setdefault("apply_status", "not-applied")
     state["summary"].setdefault("applied_branch", "")
     state["summary"].setdefault("applied_commit", "")
     state["summary"].setdefault("last_apply_report", "")
     state["summary"].setdefault("last_apply_attempt_id", "")
+    state["runtime"].setdefault("transport", "tmux")
+    state["runtime"].setdefault("supervisor", "cli")
+    state["runtime"].setdefault("transport_resume_supported", True)
+    for agent in AGENTS:
+        state["agents"].setdefault(agent, {})
+        state["agents"][agent].setdefault("workspace", "")
+        state["agents"][agent].setdefault("pane_id", "")
+        state["agents"][agent].setdefault("transport_ref", "")
+        state["agents"][agent].setdefault("transport_kind", state["runtime"]["transport"])
+        state["agents"][agent].setdefault("raw_log_path", "")
+        state["agents"][agent].setdefault("stream_offset", 0)
+        state["agents"][agent].setdefault("last_activity_at", "")
     state["agents"].setdefault("supervisor", {"pane_id": ""})
 
 
@@ -271,6 +284,17 @@ def append_combined_verbose(state: dict[str, Any], agent: str, text: str) -> Non
         append_text(verbose_path, "\n".join(rendered) + "\n")
 
 
+def record_agent_output(state: dict[str, Any], agent: str, text: str) -> str:
+    if not text:
+        return ""
+    sanitized = sanitize_terminal_text(text)
+    if not sanitized:
+        return ""
+    state["agents"][agent]["last_activity_at"] = utc_timestamp_precise()
+    append_combined_verbose(state, agent, sanitized)
+    return sanitized
+
+
 def capture_read_only_snapshot(state: dict[str, Any], turn: dict[str, Any], agent: str) -> None:
     turn_agent = turn["agents"][agent]
     if not turn_agent["active"] or not turn_agent["read_only"]:
@@ -337,11 +361,19 @@ def stream_new_agent_output(state: dict[str, Any], agent: str) -> str:
     agent_state["stream_offset"] = new_offset
     if not data:
         return ""
-    text = sanitize_terminal_text(data.decode("utf-8", errors="replace"))
-    if text:
-        agent_state["last_activity_at"] = utc_timestamp_precise()
-        append_combined_verbose(state, agent, text)
-    return text
+    return record_agent_output(state, agent, data.decode("utf-8", errors="replace"))
+
+
+def agent_runtime_ref(state: dict[str, Any], agent: str) -> str:
+    agent_state = state["agents"][agent]
+    kind = str(agent_state.get("transport_kind", "") or state.get("runtime", {}).get("transport", ""))
+    ref = str(agent_state.get("transport_ref", "") or "")
+    if ref:
+        return f"{kind}:{ref}" if kind else ref
+    pane_id = str(agent_state.get("pane_id", "") or "")
+    if pane_id:
+        return f"tmux:{pane_id}"
+    return "n/a"
 
 
 def summarize_agent_result(phase: str, payload: dict[str, Any]) -> str:
@@ -524,6 +556,7 @@ def build_report(state: dict[str, Any]) -> dict[str, Any]:
         "apply_attempts": state.get("apply_attempts", []),
         "read_only_violations": state.get("read_only_violations", []),
         "manual_confirmations_expected": state.get("manual_confirmations_expected", []),
+        "runtime": state.get("runtime", {}),
         "workspaces": state.get("workspaces", {}),
         "logs": state["logs"],
         "notes": state["notes"],
@@ -570,6 +603,8 @@ def report_markdown(data: dict[str, Any]) -> str:
         f"- Task: {data['task']}",
         f"- Status: `{data['status']}`",
         f"- Session: `{data['session_name']}`",
+        f"- Transport: `{data.get('runtime', {}).get('transport', '')}`",
+        f"- Supervisor: `{data.get('runtime', {}).get('supervisor', '')}`",
         f"- Plan approved: `{plan_approved}`",
         f"- Execution approved: `{execution_approved}`",
         f"- Final approved: `{final_approved}`",
@@ -879,6 +914,11 @@ def initialize_state(args: argparse.Namespace, *, repo: Path, task: str, run_dir
             "Claude may ask you to confirm entering bypassPermissions mode.",
             "Codex may ask you to trust the generated workspace before proceeding.",
         ],
+        "runtime": {
+            "transport": str(getattr(args, "transport", "tmux")),
+            "supervisor": "cli",
+            "transport_resume_supported": str(getattr(args, "transport", "tmux")) == "tmux",
+        },
         "notes": [],
         "turns": [],
         "summary": {},
@@ -894,6 +934,8 @@ def initialize_state(args: argparse.Namespace, *, repo: Path, task: str, run_dir
             "claude": {
                 "workspace": "",
                 "pane_id": "",
+                "transport_ref": "",
+                "transport_kind": str(getattr(args, "transport", "tmux")),
                 "raw_log_path": str(run_dir / "panes" / "claude.raw.log"),
                 "stream_offset": 0,
                 "last_activity_at": "",
@@ -901,6 +943,8 @@ def initialize_state(args: argparse.Namespace, *, repo: Path, task: str, run_dir
             "codex": {
                 "workspace": "",
                 "pane_id": "",
+                "transport_ref": "",
+                "transport_kind": str(getattr(args, "transport", "tmux")),
                 "raw_log_path": str(run_dir / "panes" / "codex.raw.log"),
                 "stream_offset": 0,
                 "last_activity_at": "",

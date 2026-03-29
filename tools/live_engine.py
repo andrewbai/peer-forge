@@ -35,13 +35,9 @@ from live_state import (
     phase_label,
     phase_summary_text,
     prompt_file_message,
-    raw_log_path,
-    read_bytes_from,
     report_path,
     save_state,
-    sanitize_terminal_text,
     session_prompt_path_for,
-    stream_new_agent_output,
     summarize_agent_result,
     summarize_signoff_objections,
     supervisor_log_line,
@@ -91,7 +87,6 @@ class ProtocolStateMachine:
             "agents": {},
         }
         for agent in AGENTS:
-            raw_path = raw_log_path(self.state, agent)
             prompt_path = turn_dir / agent / "prompt.txt"
             session_prompt_path = session_prompt_path_for(self.state, turn_id, agent)
             result_path = turn_dir / agent / "result.json"
@@ -115,7 +110,7 @@ class ProtocolStateMachine:
                 "entry_snapshot_status_path": str(entry_snapshot_status_path) if is_active and is_read_only else "",
                 "entry_snapshot_diff_path": str(entry_snapshot_diff_path) if is_active and is_read_only else "",
                 "entry_snapshot_taken_at": "",
-                "turn_start_offset": raw_path.stat().st_size if raw_path.exists() else 0,
+                "turn_start_offset": 0,
                 "parse_error": "",
                 "result": None,
                 "completed_at": "",
@@ -447,16 +442,12 @@ class RunLoop:
                 continue
             turn_agent["status"] = "running"
             if send_prompts:
-                raw_path = raw_log_path(self.state, agent)
-                turn_agent["turn_start_offset"] = raw_path.stat().st_size if raw_path.exists() else 0
+                turn_agent["turn_start_offset"] = self.transport.output_size(agent)
             turn_agent["parse_error"] = ""
             turn_agent["result"] = None
             capture_read_only_snapshot(self.state, turn, agent)
             if send_prompts:
-                self.transport.send_prompt(
-                    self.state["agents"][agent]["pane_id"],
-                    prompt_file_message(Path(turn_agent["session_prompt_path"])),
-                )
+                self.transport.send_prompt(agent, prompt_file_message(Path(turn_agent["session_prompt_path"])))
         save_state(self.state)
         write_supervisor_event(
             self.state,
@@ -487,16 +478,11 @@ class RunLoop:
                 turn_agent = turn["agents"][agent]
                 if not turn_agent["active"] or turn_agent["status"] == "completed":
                     continue
-                streamed = stream_new_agent_output(self.state, agent)
-                if streamed:
-                    last_output_time = time.time()
-                data, offsets[agent] = read_bytes_from(raw_log_path(self.state, agent), offsets[agent])
-                if data:
-                    text = sanitize_terminal_text(data.decode("utf-8", errors="replace"))
+                text, offsets[agent] = self.transport.read_output_since(agent, offsets[agent])
+                if text:
                     buffers[agent] += text
                     append_text(Path(turn_agent["turn_log_path"]), text)
-                    if text:
-                        last_output_time = time.time()
+                    last_output_time = time.time()
                 try:
                     envelope = parse_turn_result(
                         buffers[agent],
@@ -536,7 +522,7 @@ class RunLoop:
                 nudge_text = build_watchdog_nudge(turn["id"], turn["phase"])
                 for agent in AGENTS:
                     if turn["agents"][agent]["active"] and turn["agents"][agent]["status"] != "completed":
-                        self.transport.send_prompt(self.state["agents"][agent]["pane_id"], nudge_text)
+                        self.transport.send_prompt(agent, nudge_text)
                         turn["agents"][agent]["nudge_count"] += 1
                 turn["watchdog_nudges"] += 1
                 last_output_time = time.time()

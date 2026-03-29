@@ -33,11 +33,12 @@ from live_state import (
 )
 from live_supervisor import CliSupervisor
 from live_transport import (
-    TmuxTransport,
     build_claude_command,
     build_codex_command,
     build_supervisor_command,
 )
+from live_transport_pty import PtyTransport
+from live_transport_tmux import TmuxTransport
 from peer_consensus import (
     ensure_cli,
     git,
@@ -64,7 +65,7 @@ def parse_args() -> argparse.Namespace:
 
 def parse_start_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Start a live, tmux-based Peer Forge run with interactive Claude and Codex sessions.",
+        description="Start a live Peer Forge run with interactive Claude and Codex sessions.",
     )
     parser.set_defaults(command="start")
     parser.add_argument("--repo", default=".", help="Repository or workspace root. Defaults to the current directory.")
@@ -81,6 +82,12 @@ def parse_start_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument("--claude-model", help="Claude model override.")
     parser.add_argument("--codex-model", help="Codex model override.")
+    parser.add_argument(
+        "--transport",
+        choices=("tmux", "pty"),
+        default="tmux",
+        help="Live transport backend. Default: tmux.",
+    )
     parser.add_argument(
         "--signoff-rounds",
         type=int,
@@ -188,21 +195,28 @@ def start_mode(args: argparse.Namespace) -> int:
     ensure_cli("python3")
     ensure_cli("git")
 
-    transport = TmuxTransport()
-    transport.ensure_available()
-
     repo = Path(args.repo).resolve()
     task = read_task(args)
     run_root = Path(args.run_root).resolve() if args.run_root else repo / ".claude" / "tmp" / "peer-forge-live"
     run_id = f"{utc_now()}-{uuid.uuid4().hex[:8]}"
     run_dir = run_root / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
-    session_name = args.session_name or f"peer-forge-live-{run_id[-8:]}"
-    if transport.has_session(session_name):
-        raise SystemExit(f"tmux session already exists: {session_name}")
+    if args.transport == "pty" and args.no_attach:
+        raise SystemExit("--no-attach is not supported with --transport pty in P2.1.")
+    session_name = args.session_name or (
+        f"peer-forge-live-{run_id[-8:]}" if args.transport == "tmux" else f"peer-forge-live-local-{run_id[-8:]}"
+    )
 
     state = initialize_state(args, repo=repo, task=task, run_dir=run_dir, session_name=session_name)
     save_state(state)
+    if args.transport == "tmux":
+        transport = TmuxTransport(state)
+        transport.ensure_available()
+        if transport.has_session(session_name):
+            raise SystemExit(f"tmux session already exists: {session_name}")
+    else:
+        transport = PtyTransport(state)
+        transport.ensure_available()
 
     workspaces = prepare_workspaces(repo, run_dir, args.include_path)
     state["workspaces"] = {
@@ -225,24 +239,70 @@ def start_mode(args: argparse.Namespace) -> int:
     supervisor = CliSupervisor(state, transport)
     runloop = RunLoop(state, transport=transport, supervisor=supervisor, machine=machine)
 
-    created_session = False
-    try:
-        panes = transport.create_session_layout(
-            session_name=session_name,
-            claude_cwd=workspaces.claude,
-            codex_cwd=workspaces.codex,
-            supervisor_cwd=run_dir,
-            logs=state["logs"],
-        )
-        created_session = True
-        state["agents"]["claude"]["pane_id"] = panes["claude"]
-        state["agents"]["codex"]["pane_id"] = panes["codex"]
-        state["agents"]["supervisor"]["pane_id"] = panes["supervisor"]
-        save_state(state)
+    if args.transport == "tmux":
+        created_session = False
+        try:
+            panes = transport.create_session_layout(
+                session_name=session_name,
+                claude_cwd=workspaces.claude,
+                codex_cwd=workspaces.codex,
+                supervisor_cwd=run_dir,
+                logs=state["logs"],
+            )
+            created_session = True
+            state["agents"]["claude"]["pane_id"] = panes["claude"]
+            state["agents"]["claude"]["transport_ref"] = panes["claude"]
+            state["agents"]["codex"]["pane_id"] = panes["codex"]
+            state["agents"]["codex"]["transport_ref"] = panes["codex"]
+            state["agents"]["supervisor"]["pane_id"] = panes["supervisor"]
+            save_state(state)
 
+            runloop.dispatch_turn(initial_turn, send_prompts=False)
+            transport.respawn(
+                panes["claude"],
+                cwd=workspaces.claude,
+                command=build_claude_command(
+                    model=args.claude_model,
+                    bare=bool(args.claude_bare),
+                    prompt_path=claude_prompt_path,
+                ),
+            )
+            transport.respawn(
+                panes["codex"],
+                cwd=workspaces.codex,
+                command=build_codex_command(
+                    workspace=workspaces.codex,
+                    model=args.codex_model,
+                    prompt_path=codex_prompt_path,
+                ),
+            )
+            transport.respawn(
+                panes["supervisor"],
+                cwd=run_dir,
+                command=build_supervisor_command(state_path_from_run_dir(run_dir)),
+            )
+        except Exception:
+            if created_session:
+                transport.kill_session(session_name)
+            raise
+
+        if args.no_attach:
+            output = {
+                "run_id": run_id,
+                "session_name": session_name,
+                "run_dir": str(run_dir),
+                "state_file": str(state_path_from_run_dir(run_dir)),
+                "attach": f"tmux attach-session -t {session_name}",
+            }
+            print(json.dumps(output, indent=2, ensure_ascii=True))
+            return 0
+        transport.attach(session_name)
+        return 0
+
+    try:
         runloop.dispatch_turn(initial_turn, send_prompts=False)
-        transport.respawn(
-            panes["claude"],
+        transport.start_agent(
+            "claude",
             cwd=workspaces.claude,
             command=build_claude_command(
                 model=args.claude_model,
@@ -250,8 +310,8 @@ def start_mode(args: argparse.Namespace) -> int:
                 prompt_path=claude_prompt_path,
             ),
         )
-        transport.respawn(
-            panes["codex"],
+        transport.start_agent(
+            "codex",
             cwd=workspaces.codex,
             command=build_codex_command(
                 workspace=workspaces.codex,
@@ -259,39 +319,43 @@ def start_mode(args: argparse.Namespace) -> int:
                 prompt_path=codex_prompt_path,
             ),
         )
-        transport.respawn(
-            panes["supervisor"],
-            cwd=run_dir,
-            command=build_supervisor_command(state_path_from_run_dir(run_dir)),
-        )
-    except Exception:
-        if created_session:
-            transport.kill_session(session_name)
-        raise
-
-    if args.no_attach:
-        output = {
-            "run_id": run_id,
-            "session_name": session_name,
-            "run_dir": str(run_dir),
-            "state_file": str(state_path_from_run_dir(run_dir)),
-            "attach": f"tmux attach-session -t {session_name}",
-        }
-        print(json.dumps(output, indent=2, ensure_ascii=True))
+        save_state(state)
+        supervisor_log_line(state, f"Supervisor running inline for {state['run_id']} using pty transport.")
+        supervisor_log_line(state, "This is the live peer-forge protocol with plan, execution, review, and signoff phases.")
+        runloop.serve()
         return 0
-    transport.attach(session_name)
-    return 0
+    except KeyboardInterrupt as exc:
+        state["status"] = "aborted"
+        state["summary"]["abort_reason"] = str(exc)
+        save_state(state)
+        persist_report(state)
+        supervisor_log_line(state, f"Live run aborted. Report: {report_path(state)}")
+        return 130
+    except Exception as exc:
+        state["status"] = "failed"
+        state["summary"]["error"] = f"{type(exc).__name__}: {exc}"
+        traceback_path = Path(state["run_dir"]) / "failure-traceback.txt"
+        write_text(traceback_path, "".join(traceback.format_exception(exc)))
+        state["summary"]["traceback_file"] = str(traceback_path)
+        save_state(state)
+        persist_report(state)
+        supervisor_log_line(state, f"Live run failed: {type(exc).__name__}: {exc}")
+        return 1
+    finally:
+        transport.shutdown()
 
 
 def resume_mode(args: argparse.Namespace) -> int:
     ensure_cli("python3")
-    transport = TmuxTransport()
-    transport.ensure_available()
 
     state_file = Path(args.state_file).resolve()
     if not state_file.exists():
         raise SystemExit(f"State file does not exist: {state_file}")
     state = load_state(state_file)
+    if state.get("runtime", {}).get("transport") != "tmux":
+        raise SystemExit("resume currently supports only tmux-backed live runs.")
+    transport = TmuxTransport(state)
+    transport.ensure_available()
     session_name = state["session_name"]
     if not transport.has_session(session_name):
         raise SystemExit(f"tmux session not found: {session_name}")
@@ -299,7 +363,6 @@ def resume_mode(args: argparse.Namespace) -> int:
     run_dir = Path(state["run_dir"])
     supervisor_pane_id, supervisor_action = transport.repair_or_create_supervisor(
         session_name=session_name,
-        state=state,
         run_dir=run_dir,
         state_file=state_file,
     )
@@ -604,7 +667,10 @@ def apply_mode(args: argparse.Namespace) -> int:
 def serve_mode(args: argparse.Namespace) -> int:
     state_file = Path(args.state_file).resolve()
     state = load_state(state_file)
-    transport = TmuxTransport()
+    if state.get("runtime", {}).get("transport") != "tmux":
+        raise SystemExit("serve is only valid for tmux-backed live runs.")
+    transport = TmuxTransport(state)
+    transport.ensure_available()
     supervisor = CliSupervisor(state, transport)
     machine = ProtocolStateMachine(state)
     runloop = RunLoop(state, transport=transport, supervisor=supervisor, machine=machine)

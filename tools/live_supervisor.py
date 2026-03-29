@@ -10,6 +10,7 @@ from peer_consensus import clip_text, utc_timestamp_precise, write_json
 
 from live_state import (
     AGENTS,
+    agent_runtime_ref,
     current_execution_package,
     current_final_plan_path,
     current_turn,
@@ -103,6 +104,7 @@ class CliSupervisor:
         lines = [
             f"Run: {self.state['run_id']}",
             f"Session: {self.state['session_name']}",
+            f"Transport: {self.state.get('runtime', {}).get('transport', 'n/a')}",
             f"Phase: {turn['phase']}",
             f"Turn: {turn['id']}",
             f"Status: {self.state['status']}",
@@ -124,9 +126,10 @@ class CliSupervisor:
         for agent in AGENTS:
             turn_agent = turn["agents"][agent]
             agent_state = self.state["agents"][agent]
+            runtime_detail = self.transport.describe_agent(agent) or agent_runtime_ref(self.state, agent)
             detail = (
                 f"{agent}: status={turn_agent['status']}, "
-                f"pane={agent_state['pane_id']}, "
+                f"runtime={runtime_detail}, "
                 f"mode={'read-only' if turn_agent['read_only'] else 'write'}, "
                 f"last_activity={agent_state.get('last_activity_at', '') or 'n/a'}, "
                 f"nudges={turn_agent.get('nudge_count', 0)}"
@@ -193,10 +196,10 @@ class CliSupervisor:
         turn = current_turn(self.state)
         turn_agent = turn["agents"][agent]
         agent_state = self.state["agents"][agent]
-        pane_capture = self.transport.capture_recent(agent_state["pane_id"], lines=80)
+        pane_capture = self.transport.capture_recent(agent, lines=80)
         lines = [
             f"Agent: {agent}",
-            f"Pane: {agent_state['pane_id']}",
+            f"Runtime: {self.transport.describe_agent(agent) or agent_runtime_ref(self.state, agent)}",
             f"Workspace: {agent_state['workspace']}",
             f"Prompt: {turn_agent.get('prompt_path', '') or '(none)'}",
             f"Session prompt: {turn_agent.get('session_prompt_path', '') or '(none)'}",
