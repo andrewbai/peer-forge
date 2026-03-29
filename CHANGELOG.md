@@ -4,6 +4,23 @@
 
 Nothing yet.
 
+## v0.16.0 - 2026-03-29
+
+Detached PTY runtime and GUI supervision.
+
+- Refactored peer-forge-live engine into separate modules: live_engine, live_state, live_supervisor, live_transport, live_transport_tmux, live_transport_pty.
+- Added sync PTY transport alongside tmux with `--transport pty`.
+- Converted the live run loop to asyncio with async transport and supervisor interfaces.
+- Added QueueSupervisor with command queue model and local HTTP + SSE control API.
+- Added built-in Web console with dashboard, event feed, artifact tabs, agent cards, and boundary controls.
+- Added `--open-ui` and `--print-control-token` for browser-supervised startup.
+- Added detached PTY runtime: `--transport pty --no-attach` runs live as a background process.
+- Added `status` and `stop` subcommands for detached PTY lifecycle management.
+- Added runtime.process state tracking with owner PID, alive status, signal handling, and graceful shutdown.
+- Updated Web UI to display runtime mode and owner process state.
+- Added smoke tests for API, Web console, and detached PTY flows.
+- Updated all docs to recommend `--transport pty --no-attach --open-ui` as the default supervision path.
+
 ## v0.15.0 - 2026-03-29
 
 Stateful skill-load upgrade prompts.

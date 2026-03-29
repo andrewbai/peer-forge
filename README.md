@@ -16,7 +16,7 @@ It also includes a separate live mode for tmux-based side-by-side supervision wh
 
 This repo is designed to install cleanly as a Claude Code skill pack while still exposing a direct CLI launcher.
 
-Current version: `v0.15.0`
+Current version: `v0.16.0`
 
 Peer Forge now checks for new releases when a skill loads. Upgrade prompt state lives in `~/.peer-forge/`, with support for auto-upgrade, snooze, disable-check, and just-upgraded notices.
 
