@@ -6,7 +6,130 @@ description: |
   upgrade script instead of hand-written git commands.
 ---
 
+## Preamble (run first)
+
+```bash
+_UPD=""
+if [ -x "./.claude/skills/peer-forge/bin/peer-forge-update-check" ]; then
+  _UPD=$(./.claude/skills/peer-forge/bin/peer-forge-update-check 2>/dev/null || true)
+elif [ -x "$HOME/.claude/skills/peer-forge/bin/peer-forge-update-check" ]; then
+  _UPD=$("$HOME/.claude/skills/peer-forge/bin/peer-forge-update-check" 2>/dev/null || true)
+fi
+[ -n "$_UPD" ] && echo "$_UPD" || true
+```
+
+If output shows `UPGRADE_AVAILABLE <old> <new>`: follow the `Inline upgrade flow` section below. Prefer the vendored install in `./.claude/skills/peer-forge/` when it exists; otherwise use `$HOME/.claude/skills/peer-forge/`.
+
+If output shows `JUST_UPGRADED <from> <to>`: tell the user `Running peer-forge v{to} (just updated!)` and continue.
+
 # peer-forge-upgrade
+
+## Inline upgrade flow
+
+This section is referenced by the preambles of the other Peer Forge skills when they detect `UPGRADE_AVAILABLE`.
+
+State lives in `~/.peer-forge/`:
+
+- `auto-upgrade-enabled`
+- `update-check-disabled`
+- `update-snoozed`
+- `just-upgraded-from`
+
+### Step 1: Detect which install is active
+
+Prefer the vendored install in the current repo when it exists. Otherwise fall back to the global install.
+
+```bash
+PF_ROOT=""
+if [ -x "./.claude/skills/peer-forge/bin/peer-forge-upgrade" ]; then
+  PF_ROOT="./.claude/skills/peer-forge"
+elif [ -x "$HOME/.claude/skills/peer-forge/bin/peer-forge-upgrade" ]; then
+  PF_ROOT="$HOME/.claude/skills/peer-forge"
+fi
+PF_UPGRADE_BIN="$PF_ROOT/bin/peer-forge-upgrade"
+echo "PF_ROOT=$PF_ROOT"
+```
+
+If `PF_ROOT` is empty, tell the user Peer Forge is not installed at either location and stop.
+
+### Step 2: Auto-upgrade or ask
+
+```bash
+PF_STATE_DIR="${PEER_FORGE_STATE_DIR:-$HOME/.peer-forge}"
+PF_AUTO=$([ -f "$PF_STATE_DIR/auto-upgrade-enabled" ] && echo "true" || echo "false")
+echo "AUTO_UPGRADE=$PF_AUTO"
+```
+
+If `AUTO_UPGRADE=true`, tell the user `Auto-upgrading peer-forge v{old} -> v{new}...` and continue directly to Step 3.
+
+Otherwise ask the user:
+
+- `Upgrade now`
+- `Always auto-upgrade`
+- `Not now`
+- `Never ask again`
+
+If the user chooses `Always auto-upgrade`, run:
+
+```bash
+PF_STATE_DIR="${PEER_FORGE_STATE_DIR:-$HOME/.peer-forge}"
+mkdir -p "$PF_STATE_DIR"
+touch "$PF_STATE_DIR/auto-upgrade-enabled"
+rm -f "$PF_STATE_DIR/update-check-disabled"
+```
+
+Then continue to Step 3.
+
+If the user chooses `Not now`, write a snooze record with escalating backoff:
+
+```bash
+PF_STATE_DIR="${PEER_FORGE_STATE_DIR:-$HOME/.peer-forge}"
+mkdir -p "$PF_STATE_DIR"
+PF_SNOOZE_FILE="$PF_STATE_DIR/update-snoozed"
+PF_REMOTE_VER="{new}"
+PF_CUR_LEVEL=0
+if [ -f "$PF_SNOOZE_FILE" ]; then
+  PF_SNOOZED_VER=$(awk '{print $1}' "$PF_SNOOZE_FILE" 2>/dev/null || true)
+  if [ "$PF_SNOOZED_VER" = "$PF_REMOTE_VER" ]; then
+    PF_CUR_LEVEL=$(awk '{print $2}' "$PF_SNOOZE_FILE" 2>/dev/null || true)
+    case "$PF_CUR_LEVEL" in *[!0-9]*) PF_CUR_LEVEL=0 ;; esac
+  fi
+fi
+PF_NEW_LEVEL=$((PF_CUR_LEVEL + 1))
+[ "$PF_NEW_LEVEL" -gt 3 ] && PF_NEW_LEVEL=3
+echo "$PF_REMOTE_VER $PF_NEW_LEVEL $(date +%s)" > "$PF_SNOOZE_FILE"
+```
+
+Tell the user the next reminder window:
+
+- level 1: 24 hours
+- level 2: 48 hours
+- level 3: 7 days
+
+Then continue with the current skill without upgrading.
+
+If the user chooses `Never ask again`, run:
+
+```bash
+PF_STATE_DIR="${PEER_FORGE_STATE_DIR:-$HOME/.peer-forge}"
+mkdir -p "$PF_STATE_DIR"
+touch "$PF_STATE_DIR/update-check-disabled"
+rm -f "$PF_STATE_DIR/auto-upgrade-enabled"
+```
+
+Tell the user update checks are disabled and continue with the current skill.
+
+### Step 3: Run the upgrade
+
+```bash
+"$PF_UPGRADE_BIN"
+```
+
+After the upgrade:
+
+- report the new version and commit from the script output
+- mention that the checker writes a `just-upgraded-from` marker for the next skill load
+- tell the user to restart Claude Code if it is already open so refreshed skills reload cleanly
 
 Use this skill when the user says things like:
 - "升级 peer-forge"
@@ -40,6 +163,12 @@ If the global install path does not exist but the current project has a vendored
 
 ```bash
 ~/.claude/skills/peer-forge/bin/peer-forge-upgrade --check
+```
+
+## Fast Version Check
+
+```bash
+~/.claude/skills/peer-forge/bin/peer-forge-update-check --force
 ```
 
 ## What To Report

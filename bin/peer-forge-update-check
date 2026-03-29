@@ -1,0 +1,210 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage:
+  peer-forge-update-check [--force]
+
+Options:
+  --force   Ignore cached results and snooze state for this run.
+  -h, --help
+
+Output:
+  JUST_UPGRADED <old> <new>
+  UPGRADE_AVAILABLE <old> <new>
+  (nothing) when no prompt is needed
+EOF
+}
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "$script_dir/.." && pwd)"
+state_dir="${PEER_FORGE_STATE_DIR:-$HOME/.peer-forge}"
+cache_file="$state_dir/last-update-check"
+marker_file="$state_dir/just-upgraded-from"
+snooze_file="$state_dir/update-snoozed"
+disabled_file="$state_dir/update-check-disabled"
+version_file="$repo_root/VERSION"
+remote_url="${PEER_FORGE_REMOTE_URL:-https://raw.githubusercontent.com/andrewbai/peer-forge/main/VERSION}"
+force_check=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --force)
+      force_check=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "ERROR: unknown argument: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
+
+version_gt() {
+  local left="$1"
+  local right="$2"
+  local IFS=.
+  local -a left_parts right_parts
+  local i left_part right_part max_len
+
+  read -r -a left_parts <<<"$left"
+  read -r -a right_parts <<<"$right"
+  max_len="${#left_parts[@]}"
+  if (( ${#right_parts[@]} > max_len )); then
+    max_len="${#right_parts[@]}"
+  fi
+
+  for (( i = 0; i < max_len; i++ )); do
+    left_part="${left_parts[i]:-0}"
+    right_part="${right_parts[i]:-0}"
+    [[ "$left_part" =~ ^[0-9]+$ ]] || return 1
+    [[ "$right_part" =~ ^[0-9]+$ ]] || return 1
+    if (( left_part > right_part )); then
+      return 0
+    fi
+    if (( left_part < right_part )); then
+      return 1
+    fi
+  done
+
+  return 1
+}
+
+check_snooze() {
+  local remote_ver="$1"
+  local snoozed_ver snoozed_level snoozed_epoch now duration expires
+
+  if [[ ! -f "$snooze_file" ]]; then
+    return 1
+  fi
+
+  snoozed_ver="$(awk '{print $1}' "$snooze_file" 2>/dev/null || true)"
+  snoozed_level="$(awk '{print $2}' "$snooze_file" 2>/dev/null || true)"
+  snoozed_epoch="$(awk '{print $3}' "$snooze_file" 2>/dev/null || true)"
+
+  if [[ -z "$snoozed_ver" || -z "$snoozed_level" || -z "$snoozed_epoch" ]]; then
+    return 1
+  fi
+
+  case "$snoozed_level" in
+    *[!0-9]*)
+      return 1
+      ;;
+  esac
+
+  case "$snoozed_epoch" in
+    *[!0-9]*)
+      return 1
+      ;;
+  esac
+
+  if [[ "$snoozed_ver" != "$remote_ver" ]]; then
+    return 1
+  fi
+
+  case "$snoozed_level" in
+    1)
+      duration=86400
+      ;;
+    2)
+      duration=172800
+      ;;
+    *)
+      duration=604800
+      ;;
+  esac
+
+  now="$(date +%s)"
+  expires=$((snoozed_epoch + duration))
+  if (( now < expires )); then
+    return 0
+  fi
+
+  return 1
+}
+
+if [[ -f "$disabled_file" ]]; then
+  exit 0
+fi
+
+local_version="$(tr -d '[:space:]' <"$version_file" 2>/dev/null || true)"
+if [[ -z "$local_version" ]]; then
+  exit 0
+fi
+
+if [[ "$force_check" -eq 1 ]]; then
+  rm -f "$cache_file" "$snooze_file"
+fi
+
+if [[ -f "$marker_file" ]]; then
+  old_version="$(tr -d '[:space:]' <"$marker_file" 2>/dev/null || true)"
+  rm -f "$marker_file" "$snooze_file"
+  if [[ -n "$old_version" ]]; then
+    echo "JUST_UPGRADED $old_version $local_version"
+    exit 0
+  fi
+fi
+
+if [[ -f "$cache_file" ]]; then
+  cached="$(cat "$cache_file" 2>/dev/null || true)"
+  cache_ttl=0
+  case "$cached" in
+    UP_TO_DATE*)
+      cache_ttl=60
+      ;;
+    UPGRADE_AVAILABLE*)
+      cache_ttl=720
+      ;;
+  esac
+
+  if (( cache_ttl > 0 )); then
+    stale="$(find "$cache_file" -mmin +"$cache_ttl" 2>/dev/null || true)"
+    if [[ -z "$stale" ]]; then
+      case "$cached" in
+        UP_TO_DATE*)
+          cached_ver="$(awk '{print $2}' "$cache_file" 2>/dev/null || true)"
+          if [[ "$cached_ver" == "$local_version" ]]; then
+            exit 0
+          fi
+          ;;
+        UPGRADE_AVAILABLE*)
+          cached_old="$(awk '{print $2}' "$cache_file" 2>/dev/null || true)"
+          cached_new="$(awk '{print $3}' "$cache_file" 2>/dev/null || true)"
+          if [[ "$cached_old" == "$local_version" ]] && version_gt "$cached_new" "$local_version"; then
+            if check_snooze "$cached_new"; then
+              exit 0
+            fi
+            echo "$cached"
+            exit 0
+          fi
+          ;;
+      esac
+    fi
+  fi
+fi
+
+mkdir -p "$state_dir"
+
+remote_version="$(curl -sf --max-time 3 "$remote_url" 2>/dev/null || true)"
+remote_version="$(echo "$remote_version" | tr -d '[:space:]')"
+if ! echo "$remote_version" | grep -qE '^[0-9]+(\.[0-9]+)*$'; then
+  echo "UP_TO_DATE $local_version" > "$cache_file"
+  exit 0
+fi
+
+if version_gt "$remote_version" "$local_version"; then
+  echo "UPGRADE_AVAILABLE $local_version $remote_version" > "$cache_file"
+  if check_snooze "$remote_version"; then
+    exit 0
+  fi
+  echo "UPGRADE_AVAILABLE $local_version $remote_version"
+  exit 0
+fi
+
+echo "UP_TO_DATE $local_version" > "$cache_file"

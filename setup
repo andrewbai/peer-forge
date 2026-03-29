@@ -113,6 +113,7 @@ require_path "$REPO_ROOT/bin/peer-forge"
 require_path "$REPO_ROOT/bin/peer-consensus"
 require_path "$REPO_ROOT/bin/peer-forge-live"
 require_path "$REPO_ROOT/bin/peer-forge-upgrade"
+require_path "$REPO_ROOT/bin/peer-forge-update-check"
 
 echo "Checking dependencies..."
 check_bin claude

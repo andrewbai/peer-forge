@@ -19,6 +19,10 @@ EOF
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/.." && pwd)"
+state_dir="${PEER_FORGE_STATE_DIR:-$HOME/.peer-forge}"
+cache_file="$state_dir/last-update-check"
+marker_file="$state_dir/just-upgraded-from"
+snooze_file="$state_dir/update-snoozed"
 check_only=0
 
 while [[ $# -gt 0 ]]; do
@@ -140,6 +144,12 @@ fi
 
 after_commit="$(git -C "$repo_root" rev-parse --short HEAD)"
 after_version="$(tr -d '\n' <"$repo_root/VERSION" 2>/dev/null || echo "unknown")"
+
+mkdir -p "$state_dir"
+rm -f "$cache_file" "$snooze_file"
+if [[ "$did_update" -eq 1 ]]; then
+  printf '%s\n' "$before_version" > "$marker_file"
+fi
 
 if [[ "$did_update" -eq 1 ]]; then
   echo

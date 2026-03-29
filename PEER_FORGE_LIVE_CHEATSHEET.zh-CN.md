@@ -1,6 +1,6 @@
 # Peer Forge Live 完整使用 Cheat Sheet
 
-版本：`v0.14.0`
+版本：`v0.15.0`
 
 这份文档是给你实际跑一整次 `peer-forge-live` 用的中文操作手册。
 

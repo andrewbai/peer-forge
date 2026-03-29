@@ -4,6 +4,16 @@
 
 Nothing yet.
 
+## v0.15.0 - 2026-03-29
+
+Stateful skill-load upgrade prompts.
+
+- Added `peer-forge-update-check`, a lightweight version checker with cache, snooze, disable-check, and just-upgraded marker support under `~/.peer-forge/`.
+- Added skill preambles to every Peer Forge skill entry so version checks happen automatically when the skill is loaded.
+- Added an inline upgrade flow to `peer-forge-upgrade/SKILL.md` with four outcomes: upgrade now, always auto-upgrade, snooze, or disable checks.
+- Updated `peer-forge-upgrade` to clear cached prompt state after successful upgrades and emit a just-upgraded marker for the next skill load.
+- Documented the new auto-update behavior in the English and Chinese READMEs.
+
 ## v0.14.1 - 2026-03-29
 
 Live Claude auth fix for `peer-forge-live`.

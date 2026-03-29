@@ -6,6 +6,22 @@ description: |
   then one side executes and the other side reviews. Task-only usage is allowed. Acceptance criteria are optional.
 ---
 
+## Preamble (run first)
+
+```bash
+_UPD=""
+if [ -x "./.claude/skills/peer-forge/bin/peer-forge-update-check" ]; then
+  _UPD=$(./.claude/skills/peer-forge/bin/peer-forge-update-check 2>/dev/null || true)
+elif [ -x "$HOME/.claude/skills/peer-forge/bin/peer-forge-update-check" ]; then
+  _UPD=$("$HOME/.claude/skills/peer-forge/bin/peer-forge-update-check" 2>/dev/null || true)
+fi
+[ -n "$_UPD" ] && echo "$_UPD" || true
+```
+
+If output shows `UPGRADE_AVAILABLE <old> <new>`: read the installed `peer-forge-upgrade/SKILL.md` and follow the `Inline upgrade flow` section. Prefer the vendored install in `./.claude/skills/peer-forge/` when it exists; otherwise use `$HOME/.claude/skills/peer-forge/`. Auto-upgrade if enabled; otherwise ask whether to upgrade now, always auto-upgrade, snooze, or disable checks.
+
+If output shows `JUST_UPGRADED <from> <to>`: tell the user `Running peer-forge v{to} (just updated!)` and continue.
+
 # peer-forge
 
 `peer-forge` is the simple skill-first entrypoint.
