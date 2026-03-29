@@ -83,6 +83,17 @@ If the user wants the tmux session created without auto-attach:
   --no-attach
 ```
 
+`peer-forge-live` 默认不会给 Claude 加 `--bare`，这样 Claude Max、OAuth 和 keychain 登录态可以在 live 交互会话里继续使用。
+
+Only enable bare mode when explicitly needed:
+
+```bash
+~/.claude/skills/peer-forge/bin/peer-forge-live \
+  --repo . \
+  --task "用户的原始任务" \
+  --claude-bare
+```
+
 If the user already has a `state.json` and wants to re-attach or repair the supervisor pane:
 
 ```bash

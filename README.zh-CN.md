@@ -19,7 +19,7 @@
 - 作为 Claude Code 的技能包直接安装
 - 作为独立 CLI 仓库直接运行
 
-当前版本：`v0.14.0`
+当前版本：`v0.14.1`
 
 ## 目录结构
 
@@ -138,6 +138,17 @@ live tmux 模式：
 ~/.claude/skills/peer-forge/bin/peer-forge-live \
   --repo . \
   --task "让 Claude Code 和 Codex 独立出方案、互相 review，并且我在旁边实时监督。"
+```
+
+`peer-forge-live` 现在默认不会给 Claude 加 `--bare`，这样 Claude Max、OAuth 和 keychain 登录态在交互式 live session 里可以继续使用。
+
+只有在你明确需要 bare mode 时才显式开启：
+
+```bash
+~/.claude/skills/peer-forge/bin/peer-forge-live \
+  --repo . \
+  --task "以 Claude bare mode 运行 live workflow。" \
+  --claude-bare
 ```
 
 恢复或重新附着已有的 live run：

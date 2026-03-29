@@ -151,9 +151,9 @@ def parse_start_args(argv: list[str]) -> argparse.Namespace:
         help="Create the tmux session and start the run, but do not attach to it.",
     )
     parser.add_argument(
-        "--no-claude-bare",
+        "--claude-bare",
         action="store_true",
-        help="Disable Claude bare mode. Bare mode is enabled by default to reduce prompt contamination.",
+        help="Enable Claude bare mode. Use this only when you explicitly want bare mode, such as API-key-based auth instead of Claude Max/OAuth.",
     )
     args = parser.parse_args(argv)
     if args.signoff_rounds < 0:
@@ -1624,7 +1624,7 @@ def initialize_state(args: argparse.Namespace, *, repo: Path, task: str, run_dir
         "include_path": list(args.include_path),
         "claude_model": args.claude_model,
         "codex_model": args.codex_model,
-        "claude_bare": not args.no_claude_bare,
+        "claude_bare": bool(args.claude_bare),
         "signoff_rounds": args.signoff_rounds,
         "watchdog_seconds": args.watchdog_seconds,
         "max_watchdog_nudges": args.max_watchdog_nudges,
@@ -2721,7 +2721,7 @@ def start_mode(args: argparse.Namespace) -> int:
             cwd=workspaces.claude,
             command=build_claude_command(
                 model=args.claude_model,
-                bare=not args.no_claude_bare,
+                bare=bool(args.claude_bare),
                 prompt_path=claude_prompt_path,
             ),
         )

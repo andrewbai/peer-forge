@@ -16,7 +16,7 @@ It also includes a separate live mode for tmux-based side-by-side supervision wh
 
 This repo is designed to install cleanly as a Claude Code skill pack while still exposing a direct CLI launcher.
 
-Current version: `v0.14.0`
+Current version: `v0.14.1`
 
 ## Structure
 
@@ -135,6 +135,17 @@ Live tmux mode:
 ~/.claude/skills/peer-forge/bin/peer-forge-live \
   --repo . \
   --task "Have Claude Code and Codex draft plans independently, cross-review, and converge while I supervise live."
+```
+
+`peer-forge-live` now starts Claude without `--bare` by default so Claude Max, OAuth, and keychain-backed auth continue to work in interactive live sessions.
+
+Only opt into bare mode when you explicitly want it:
+
+```bash
+~/.claude/skills/peer-forge/bin/peer-forge-live \
+  --repo . \
+  --task "Run the live workflow with Claude bare mode enabled." \
+  --claude-bare
 ```
 
 Resume or re-attach to an existing live run:

@@ -4,6 +4,15 @@
 
 Nothing yet.
 
+## v0.14.1 - 2026-03-29
+
+Live Claude auth fix for `peer-forge-live`.
+
+- Changed `peer-forge-live` so Claude bare mode is now opt-in instead of opt-out.
+- Replaced `--no-claude-bare` with `--claude-bare` in the live CLI.
+- Defaulted live Claude sessions to preserve Claude Max, OAuth, and keychain-backed auth.
+- Updated the English README, Chinese README, and `peer-forge-live` skill docs to document the new live bare-mode behavior.
+
 ## v0.14.0 - 2026-03-29
 
 Conflict-aware live apply.
