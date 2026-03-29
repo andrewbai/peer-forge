@@ -28,6 +28,34 @@ DISPLAY_NAMES = {
     "claude": "Claude Code",
     "codex": "Codex",
 }
+SUPERVISOR_COMMANDS = {
+    "running": [
+        "status",
+        "tail claude",
+        "tail codex",
+        "inspect claude",
+        "inspect codex",
+        "show final-plan",
+        "show package",
+        "show diff",
+        "show manifest",
+        "wait",
+        "abort",
+    ],
+    "boundary": [
+        "continue",
+        "status",
+        "tail claude",
+        "tail codex",
+        "inspect claude",
+        "inspect codex",
+        "show final-plan",
+        "show package",
+        "show diff",
+        "show manifest",
+        "abort",
+    ],
+}
 ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 OSC_RE = re.compile(r"\x1b\][^\x07]*(?:\x07|\x1b\\)")
 
@@ -100,6 +128,12 @@ def normalize_state(state: dict[str, Any]) -> None:
     control.setdefault("token", "")
     control.setdefault("base_url", "")
     control.setdefault("events_stream_url", "")
+    boundary = state["runtime"].setdefault("boundary", {})
+    boundary.setdefault("active", False)
+    boundary.setdefault("label", "")
+    boundary.setdefault("next_phase", "")
+    boundary.setdefault("entered_at", "")
+    boundary.setdefault("allowed_commands", [])
     for agent in AGENTS:
         state["agents"].setdefault(agent, {})
         state["agents"][agent].setdefault("workspace", "")
@@ -255,6 +289,87 @@ def current_execution_package(state: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
+def boundary_runtime_state(state: dict[str, Any]) -> dict[str, Any]:
+    runtime = state.setdefault("runtime", {})
+    boundary = runtime.setdefault("boundary", {})
+    boundary.setdefault("active", False)
+    boundary.setdefault("label", "")
+    boundary.setdefault("next_phase", "")
+    boundary.setdefault("entered_at", "")
+    boundary.setdefault("allowed_commands", [])
+    return boundary
+
+
+def allowed_supervisor_commands(mode: str, *, next_phase: str | None = None) -> list[str]:
+    commands = list(SUPERVISOR_COMMANDS.get(mode, []))
+    if next_phase is not None:
+        insert_at = len(commands) - 1 if commands and commands[-1] == "abort" else len(commands)
+        commands.insert(insert_at, "note both <text>")
+    return commands
+
+
+def activate_boundary_state(state: dict[str, Any], *, label: str, next_phase: str | None) -> dict[str, Any]:
+    boundary = boundary_runtime_state(state)
+    boundary["active"] = True
+    boundary["label"] = label
+    boundary["next_phase"] = next_phase or ""
+    boundary["entered_at"] = utc_timestamp_precise()
+    boundary["allowed_commands"] = allowed_supervisor_commands("boundary", next_phase=next_phase)
+    save_state(state)
+    write_supervisor_event(
+        state,
+        {
+            "type": "boundary-entered",
+            "timestamp": boundary["entered_at"],
+            "label": label,
+            "next_phase": next_phase or "",
+            "allowed_commands": list(boundary["allowed_commands"]),
+        },
+    )
+    return dict(boundary)
+
+
+def clear_boundary_state(state: dict[str, Any], *, resolution: str) -> None:
+    boundary = boundary_runtime_state(state)
+    if not boundary.get("active"):
+        return
+    previous = dict(boundary)
+    boundary["active"] = False
+    boundary["label"] = ""
+    boundary["next_phase"] = ""
+    boundary["entered_at"] = ""
+    boundary["allowed_commands"] = []
+    save_state(state)
+    write_supervisor_event(
+        state,
+        {
+            "type": "boundary-resumed",
+            "timestamp": utc_timestamp_precise(),
+            "resolution": resolution,
+            "label": previous.get("label", ""),
+            "next_phase": previous.get("next_phase", ""),
+        },
+    )
+
+
+def update_run_status(state: dict[str, Any], status: str, *, detail: str = "") -> bool:
+    previous = str(state.get("status", "") or "")
+    if previous == status:
+        return False
+    state["status"] = status
+    write_supervisor_event(
+        state,
+        {
+            "type": "run-status-changed",
+            "timestamp": utc_timestamp_precise(),
+            "previous_status": previous,
+            "status": status,
+            "detail": detail,
+        },
+    )
+    return True
+
+
 def final_candidate_path(state: dict[str, Any]) -> Path:
     return Path(state["run_dir"]) / "final-plan.json"
 
@@ -272,6 +387,193 @@ def package_manifest_path(package: dict[str, Any]) -> Path:
 
 def package_diff_path(package: dict[str, Any]) -> Path:
     return Path(package["diff_path"])
+
+
+def _compact_text_preview(text: str, *, max_lines: int) -> tuple[str, int, bool]:
+    lines = text.splitlines()
+    if not lines:
+        return "(empty)", 0, False
+    truncated = len(lines) > max_lines
+    preview = "\n".join(lines[:max_lines])
+    if truncated:
+        preview += f"\n... ({len(lines) - max_lines} more lines truncated)"
+    return preview, len(lines), truncated
+
+
+def text_artifact_payload(path: Path, *, max_lines: int = 200, parse_json_payload: bool = False) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "available": path.exists(),
+        "path": str(path),
+        "preview": "(missing)",
+        "line_count": 0,
+        "truncated": False,
+    }
+    if not path.exists():
+        if parse_json_payload:
+            payload["data"] = None
+        return payload
+    text = path.read_text(encoding="utf-8", errors="replace")
+    preview, line_count, truncated = _compact_text_preview(text, max_lines=max_lines)
+    payload["preview"] = preview
+    payload["line_count"] = line_count
+    payload["truncated"] = truncated
+    if parse_json_payload:
+        try:
+            payload["data"] = json.loads(text)
+        except json.JSONDecodeError:
+            payload["data"] = None
+            payload["parse_error"] = "invalid_json"
+    return payload
+
+
+def current_execution_package_payload(state: dict[str, Any]) -> dict[str, Any]:
+    package = current_execution_package(state)
+    if package is None:
+        return {
+            "available": False,
+            "package": None,
+            "manifest": None,
+            "error": "",
+        }
+    payload: dict[str, Any] = {
+        "available": True,
+        "package": {
+            "turn_id": package.get("turn_id", ""),
+            "phase": package.get("phase", ""),
+            "executor": package.get("executor", ""),
+            "created_at": package.get("created_at", ""),
+            "package_dir": package.get("package_dir", ""),
+            "manifest_path": package.get("manifest_path", ""),
+            "diff_path": package.get("diff_path", ""),
+            "changed_files": list(package.get("changed_files", [])),
+        },
+        "manifest": None,
+        "error": "",
+    }
+    try:
+        payload["manifest"] = load_execution_manifest(package)
+    except RuntimeError as exc:
+        payload["error"] = str(exc)
+    return payload
+
+
+def final_plan_payload(state: dict[str, Any], *, max_lines: int = 200) -> dict[str, Any]:
+    return text_artifact_payload(current_final_plan_path(state), max_lines=max_lines, parse_json_payload=True)
+
+
+def current_diff_payload(state: dict[str, Any], *, max_lines: int = 300) -> dict[str, Any]:
+    package = current_execution_package(state)
+    if package is None:
+        return {
+            "available": False,
+            "path": "",
+            "preview": "(missing)",
+            "line_count": 0,
+            "truncated": False,
+        }
+    return text_artifact_payload(package_diff_path(package), max_lines=max_lines, parse_json_payload=False)
+
+
+def build_dashboard_snapshot(state: dict[str, Any]) -> dict[str, Any]:
+    runtime = state.get("runtime", {})
+    control = runtime.get("control", {}) if isinstance(runtime, dict) else {}
+    boundary = dict(boundary_runtime_state(state))
+    summary = state.get("summary", {})
+    package_payload = current_execution_package_payload(state)
+    final_plan = final_plan_payload(state, max_lines=80)
+    current_diff = current_diff_payload(state, max_lines=80)
+    turns_payload: list[dict[str, Any]] = []
+    current = state["turns"][-1] if state.get("turns") else None
+    for turn in state.get("turns", []):
+        active_agents = [agent for agent in AGENTS if turn["agents"][agent]["active"]]
+        turns_payload.append(
+            {
+                "id": turn["id"],
+                "index": turn.get("index", 0),
+                "phase": turn["phase"],
+                "phase_family": turn.get("phase_family", phase_label(turn["phase"])),
+                "mode": turn.get("mode", ""),
+                "summary": turn.get("summary", ""),
+                "status": turn["status"],
+                "started_at": turn.get("started_at", ""),
+                "completed_at": turn.get("completed_at", ""),
+                "active_agents": active_agents,
+                "read_only_agents": [agent for agent in active_agents if turn["agents"][agent]["read_only"]],
+            }
+        )
+    current_turn_payload = None
+    if current is not None:
+        current_turn_payload = {
+            "id": current["id"],
+            "index": current.get("index", 0),
+            "phase": current["phase"],
+            "phase_family": current.get("phase_family", phase_label(current["phase"])),
+            "mode": current.get("mode", ""),
+            "summary": current.get("summary", ""),
+            "status": current["status"],
+            "started_at": current.get("started_at", ""),
+            "completed_at": current.get("completed_at", ""),
+        }
+    agents_payload: dict[str, Any] = {}
+    for agent in AGENTS:
+        agent_state = state["agents"][agent]
+        turn_agent = current["agents"][agent] if current is not None else None
+        agents_payload[agent] = {
+            "active": bool(turn_agent["active"]) if turn_agent is not None else False,
+            "status": turn_agent["status"] if turn_agent is not None else "idle",
+            "read_only": bool(turn_agent["read_only"]) if turn_agent is not None else False,
+            "runtime": agent_runtime_ref(state, agent),
+            "transport_kind": agent_state.get("transport_kind", ""),
+            "workspace": agent_state.get("workspace", ""),
+            "last_activity_at": agent_state.get("last_activity_at", ""),
+            "nudge_count": int(turn_agent.get("nudge_count", 0)) if turn_agent is not None else 0,
+            "parse_error": turn_agent.get("parse_error", "") if turn_agent is not None else "",
+        }
+    return {
+        "run": {
+            "run_id": state["run_id"],
+            "status": state.get("status", ""),
+            "current_phase": state.get("current_phase", ""),
+            "session_name": state.get("session_name", ""),
+            "transport": runtime.get("transport", "") if isinstance(runtime, dict) else "",
+            "supervisor": runtime.get("supervisor", "") if isinstance(runtime, dict) else "",
+            "created_at": state.get("created_at", ""),
+        },
+        "control": {
+            "base_url": control.get("base_url", "") if isinstance(control, dict) else "",
+            "events_stream_url": control.get("events_stream_url", "") if isinstance(control, dict) else "",
+        },
+        "boundary": boundary,
+        "summary": {
+            "plan_approved": bool(summary.get("plan_approved", False)),
+            "execution_approved": bool(summary.get("execution_approved", False)),
+            "final_approved": bool(summary.get("final_approved", False)),
+            "selected_executor": state.get("selected_executor", ""),
+            "selected_reviewer": state.get("selected_reviewer", ""),
+            "read_only_violations": len(state.get("read_only_violations", [])),
+            "notes_count": len(state.get("notes", [])),
+        },
+        "turns": turns_payload,
+        "current_turn": current_turn_payload,
+        "agents": agents_payload,
+        "artifacts": {
+            "final_plan_available": bool(final_plan.get("available", False)),
+            "current_package_available": bool(package_payload.get("available", False)),
+            "current_diff_available": bool(current_diff.get("available", False)),
+            "current_package_changed_files": len(
+                (package_payload.get("package") or {}).get("changed_files", []) if package_payload.get("package") else []
+            ),
+        },
+        "notes": [
+            {
+                "id": note.get("id", ""),
+                "summary": note.get("summary", ""),
+                "applies_from_phase": note.get("applies_from_phase", ""),
+                "applies_from_turn": note.get("applies_from_turn", 0),
+            }
+            for note in state.get("notes", [])
+        ],
+    }
 
 
 def append_combined_verbose(state: dict[str, Any], agent: str, text: str) -> None:
@@ -932,6 +1234,13 @@ def initialize_state(args: argparse.Namespace, *, repo: Path, task: str, run_dir
                 "token": "",
                 "base_url": "",
                 "events_stream_url": "",
+            },
+            "boundary": {
+                "active": False,
+                "label": "",
+                "next_phase": "",
+                "entered_at": "",
+                "allowed_commands": [],
             },
         },
         "notes": [],

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -12,7 +13,16 @@ from urllib.parse import parse_qs, urlparse
 
 from peer_consensus import utc_timestamp_precise
 
-from live_state import load_state, save_state, supervisor_log_line, write_supervisor_event
+from live_state import (
+    build_dashboard_snapshot,
+    current_diff_payload,
+    current_execution_package_payload,
+    final_plan_payload,
+    load_state,
+    save_state,
+    supervisor_log_line,
+    write_supervisor_event,
+)
 
 
 def _parse_int(value: str | None, *, default: int = 0, minimum: int = 0, maximum: int | None = None) -> int:
@@ -268,6 +278,15 @@ class LiveControlServer:
             self._send_json(handler, HTTPStatus.OK, self._state_snapshot())
             return
 
+        if path == "/dashboard":
+            snapshot = self._state_snapshot()
+            self._send_json(handler, HTTPStatus.OK, build_dashboard_snapshot(snapshot))
+            return
+
+        if path == "/commands/schema":
+            self._send_json(handler, HTTPStatus.OK, self.supervisor.command_schema())
+            return
+
         if path == "/events":
             after = _parse_int((params.get("after") or [None])[0], default=0, minimum=0)
             limit = _parse_int((params.get("limit") or [None])[0], default=200, minimum=1, maximum=1000)
@@ -286,6 +305,54 @@ class LiveControlServer:
             after = _parse_int((params.get("after") or [None])[0], default=0, minimum=0)
             self._stream_events(handler, after=after)
             return
+
+        path_parts = [part for part in path.split("/") if part]
+        if len(path_parts) >= 3 and path_parts[0] == "agents":
+            agent = path_parts[1]
+            action = path_parts[2]
+            if action == "tail":
+                lines = _parse_int((params.get("lines") or [None])[0], default=80, minimum=1, maximum=1000)
+                try:
+                    payload = self.supervisor.tail_agent_payload(agent, lines=lines)
+                except (RuntimeError, ValueError) as exc:
+                    self._send_json(
+                        handler,
+                        HTTPStatus.BAD_REQUEST,
+                        {
+                            "error": str(exc),
+                        },
+                    )
+                    return
+                self._send_json(handler, HTTPStatus.OK, payload)
+                return
+            if action == "inspect":
+                try:
+                    payload = asyncio.run(self.supervisor.inspect_agent_payload(agent))
+                except (RuntimeError, ValueError) as exc:
+                    self._send_json(
+                        handler,
+                        HTTPStatus.BAD_REQUEST,
+                        {
+                            "error": str(exc),
+                        },
+                    )
+                    return
+                self._send_json(handler, HTTPStatus.OK, payload)
+                return
+
+        if len(path_parts) >= 2 and path_parts[0] == "artifacts":
+            artifact = path_parts[1]
+            if artifact == "final-plan":
+                lines = _parse_int((params.get("lines") or [None])[0], default=200, minimum=1, maximum=2000)
+                self._send_json(handler, HTTPStatus.OK, final_plan_payload(self._state_snapshot(), max_lines=lines))
+                return
+            if artifact == "current-package":
+                self._send_json(handler, HTTPStatus.OK, current_execution_package_payload(self._state_snapshot()))
+                return
+            if artifact == "current-diff":
+                lines = _parse_int((params.get("lines") or [None])[0], default=300, minimum=1, maximum=5000)
+                self._send_json(handler, HTTPStatus.OK, current_diff_payload(self._state_snapshot(), max_lines=lines))
+                return
 
         self._send_not_found(handler)
 

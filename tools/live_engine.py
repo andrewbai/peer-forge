@@ -22,6 +22,7 @@ from live_protocol import (
 from live_state import (
     AGENTS,
     DISPLAY_NAMES,
+    activate_boundary_state,
     active_notes_for_turn,
     append_text,
     boundary_pending,
@@ -44,6 +45,7 @@ from live_state import (
     turn_dir_for,
     turn_id_for,
     turn_results,
+    update_run_status,
     validate_read_only_snapshot,
     write_supervisor_event,
 )
@@ -116,10 +118,10 @@ class ProtocolStateMachine:
                 "completed_at": "",
                 "nudge_count": 0,
                 "read_only_violation": None,
-            }
+        }
         self.state["turns"].append(turn)
         self.state["current_phase"] = phase
-        self.state["status"] = "running"
+        update_run_status(self.state, "running", detail=f"phase={phase}")
         save_state(self.state)
         return turn
 
@@ -509,6 +511,16 @@ class RunLoop:
                 turn["status"] = "completed"
                 turn["completed_at"] = utc_timestamp_precise()
                 save_state(self.state)
+                write_supervisor_event(
+                    self.state,
+                    {
+                        "type": "turn-completed",
+                        "timestamp": turn["completed_at"],
+                        "turn_id": turn["id"],
+                        "phase": turn["phase"],
+                        "active_agents": [agent for agent in AGENTS if turn["agents"][agent]["active"]],
+                    },
+                )
                 return {
                     agent: turn["agents"][agent]["result"]
                     for agent in AGENTS
@@ -559,6 +571,7 @@ class RunLoop:
 
     async def maybe_pause_boundary(self, *, phase: str, label: str, next_phase: str | None) -> None:
         if boundary_pending(self.state, phase):
+            activate_boundary_state(self.state, label=label, next_phase=next_phase)
             await self.supervisor.pause_for_boundary(label=label, next_phase=next_phase)
 
     async def serve(self) -> None:
@@ -663,7 +676,11 @@ class RunLoop:
             )
             signoff_round_index = fix_round
 
-        self.state["status"] = "approved" if final_approved else "needs-attention"
+        update_run_status(
+            self.state,
+            "approved" if final_approved else "needs-attention",
+            detail="plan-stage-complete",
+        )
         self.state["summary"]["plan_approved"] = final_approved
         self.state["summary"]["final_approved"] = final_approved
         self.state["summary"]["plan_signoffs"] = latest_signoffs
@@ -746,7 +763,7 @@ class RunLoop:
             )
         else:
             if self.state["signoff_rounds"] == 0:
-                self.state["status"] = "needs-attention"
+                update_run_status(self.state, "needs-attention", detail="execution-review-rejected")
                 self.state["summary"]["execution_approved"] = False
                 self.state["summary"]["final_approved"] = False
                 save_state(self.state)
@@ -822,7 +839,11 @@ class RunLoop:
             )
             execution_fix_round = next_fix_round
 
-        self.state["status"] = "approved" if execution_approved else "needs-attention"
+        update_run_status(
+            self.state,
+            "approved" if execution_approved else "needs-attention",
+            detail="execution-stage-complete",
+        )
         self.state["summary"]["execution_approved"] = execution_approved
         self.state["summary"]["execution_signoffs"] = current_execution_signoffs
         self.state["summary"]["current_execution"] = current_execution

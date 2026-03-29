@@ -12,6 +12,7 @@ from live_api import LiveControlServer
 from live_engine import ProtocolStateMachine, RunLoop
 from live_state import (
     branch_exists,
+    clear_boundary_state,
     current_branch_name,
     current_execution_package,
     default_apply_branch,
@@ -31,6 +32,7 @@ from live_state import (
     save_state,
     state_path_from_run_dir,
     supervisor_log_line,
+    update_run_status,
     write_supervisor_event,
 )
 from live_supervisor import CliSupervisor, QueueSupervisor
@@ -382,14 +384,16 @@ def start_mode(args: argparse.Namespace) -> int:
         asyncio.run(runloop.serve())
         return 0
     except KeyboardInterrupt as exc:
-        state["status"] = "aborted"
+        clear_boundary_state(state, resolution="abort")
+        update_run_status(state, "aborted", detail=str(exc))
         state["summary"]["abort_reason"] = str(exc)
         save_state(state)
         persist_report(state)
         supervisor_log_line(state, f"Live run aborted. Report: {report_path(state)}")
         return 130
     except Exception as exc:
-        state["status"] = "failed"
+        clear_boundary_state(state, resolution="error")
+        update_run_status(state, "failed", detail=f"{type(exc).__name__}: {exc}")
         state["summary"]["error"] = f"{type(exc).__name__}: {exc}"
         traceback_path = Path(state["run_dir"]) / "failure-traceback.txt"
         write_text(traceback_path, "".join(traceback.format_exception(exc)))
@@ -750,14 +754,16 @@ def serve_mode(args: argparse.Namespace) -> int:
         asyncio.run(runloop.serve())
         return 0
     except KeyboardInterrupt as exc:
-        state["status"] = "aborted"
+        clear_boundary_state(state, resolution="abort")
+        update_run_status(state, "aborted", detail=str(exc))
         state["summary"]["abort_reason"] = str(exc)
         save_state(state)
         persist_report(state)
         supervisor_log_line(state, f"Live run aborted. Report: {report_path(state)}")
         return 130
     except Exception as exc:
-        state["status"] = "failed"
+        clear_boundary_state(state, resolution="error")
+        update_run_status(state, "failed", detail=f"{type(exc).__name__}: {exc}")
         state["summary"]["error"] = f"{type(exc).__name__}: {exc}"
         traceback_path = Path(state["run_dir"]) / "failure-traceback.txt"
         write_text(traceback_path, "".join(traceback.format_exception(exc)))

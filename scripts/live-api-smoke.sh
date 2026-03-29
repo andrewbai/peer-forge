@@ -70,6 +70,41 @@ curl -sf \
   "$base_url/state" \
   | python3 -c 'import json, sys; data = json.load(sys.stdin); assert data["run_id"]; assert "runtime" in data; print("[live-api-smoke] state ok")'
 
+curl -sf \
+  -H "X-Peer-Forge-Token: $token" \
+  "$base_url/dashboard" \
+  | python3 -c 'import json, sys; data = json.load(sys.stdin); assert data["run"]["run_id"]; assert "boundary" in data; assert "turns" in data; assert data["boundary"]["active"] in (True, False); print("[live-api-smoke] dashboard ok")'
+
+curl -sf \
+  -H "X-Peer-Forge-Token: $token" \
+  "$base_url/commands/schema" \
+  | python3 -c 'import json, sys; data = json.load(sys.stdin); assert "running" in data and "boundary" in data; assert any("note both" in item for item in data["running"]); print("[live-api-smoke] command schema ok")'
+
+curl -sf \
+  -H "X-Peer-Forge-Token: $token" \
+  "$base_url/agents/claude/tail?lines=20" \
+  | python3 -c 'import json, sys; data = json.load(sys.stdin); assert data["agent"] == "claude"; assert "tail" in data; print("[live-api-smoke] agent tail ok")'
+
+curl -sf \
+  -H "X-Peer-Forge-Token: $token" \
+  "$base_url/agents/claude/inspect" \
+  | python3 -c 'import json, sys; data = json.load(sys.stdin); assert data["agent"] == "claude"; assert "pane_capture" in data; print("[live-api-smoke] agent inspect ok")'
+
+curl -sf \
+  -H "X-Peer-Forge-Token: $token" \
+  "$base_url/artifacts/final-plan" \
+  | python3 -c 'import json, sys; data = json.load(sys.stdin); assert "available" in data; print("[live-api-smoke] final-plan artifact ok")'
+
+curl -sf \
+  -H "X-Peer-Forge-Token: $token" \
+  "$base_url/artifacts/current-package" \
+  | python3 -c 'import json, sys; data = json.load(sys.stdin); assert "available" in data; print("[live-api-smoke] current-package artifact ok")'
+
+curl -sf \
+  -H "X-Peer-Forge-Token: $token" \
+  "$base_url/artifacts/current-diff" \
+  | python3 -c 'import json, sys; data = json.load(sys.stdin); assert "available" in data; print("[live-api-smoke] current-diff artifact ok")'
+
 command_response="$(
   curl -sf \
     -X POST \

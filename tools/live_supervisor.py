@@ -13,7 +13,9 @@ from peer_consensus import clip_text, utc_timestamp_precise, write_json
 
 from live_state import (
     AGENTS,
+    allowed_supervisor_commands,
     agent_runtime_ref,
+    clear_boundary_state,
     current_execution_package,
     current_final_plan_path,
     current_turn,
@@ -132,6 +134,11 @@ class QueueSupervisor:
         control = self.state.get("runtime", {}).get("control", {})
         if control.get("base_url"):
             lines.append(f"Control API: {control['base_url']}")
+        boundary = self.state.get("runtime", {}).get("boundary", {})
+        if boundary.get("active"):
+            lines.append(
+                f"Boundary: active label={boundary.get('label', '')!r} next_phase={boundary.get('next_phase', '') or 'n/a'}",
+            )
         if package:
             lines.extend(
                 [
@@ -209,38 +216,84 @@ class QueueSupervisor:
             read_text_preview(path),
         ]
 
-    async def inspect_agent(self, agent: str) -> list[str]:
+    def tail_agent_payload(self, agent: str, *, lines: int = 60) -> dict[str, Any]:
+        if agent not in AGENTS:
+            raise ValueError(f"Unknown agent: {agent}")
+        turn = current_turn(self.state)
+        turn_agent = turn["agents"][agent]
+        turn_log_path = str(turn_agent.get("turn_log_path", "") or "")
+        path = Path(turn_log_path) if turn_log_path else None
+        return {
+            "agent": agent,
+            "turn_id": turn["id"],
+            "phase": turn["phase"],
+            "active": bool(turn_agent.get("active", False)),
+            "path": str(path) if path is not None else "",
+            "tail": read_file_tail(path, lines=lines) if path is not None else "(inactive)",
+            "lines": lines,
+        }
+
+    async def inspect_agent_payload(self, agent: str) -> dict[str, Any]:
         turn = current_turn(self.state)
         turn_agent = turn["agents"][agent]
         agent_state = self.state["agents"][agent]
+        turn_log_path = str(turn_agent.get("turn_log_path", "") or "")
+        path = Path(turn_log_path) if turn_log_path else None
         pane_capture = await self.transport.capture_recent(agent, lines=80)
+        return {
+            "agent": agent,
+            "runtime": self.transport.describe_agent(agent) or agent_runtime_ref(self.state, agent),
+            "workspace": agent_state["workspace"],
+            "prompt_path": turn_agent.get("prompt_path", "") or "",
+            "session_prompt_path": turn_agent.get("session_prompt_path", "") or "",
+            "raw_log_path": agent_state["raw_log_path"],
+            "turn_log_path": turn_log_path,
+            "result_path": turn_agent.get("result_path", "") or "",
+            "status": turn_agent["status"],
+            "active": bool(turn_agent.get("active", False)),
+            "parse_error": turn_agent.get("parse_error", "") or "",
+            "result": turn_agent.get("result"),
+            "turn_log_tail": read_file_tail(path, lines=40) if path is not None else "(inactive)",
+            "pane_capture": sanitize_terminal_text(pane_capture).strip() or "(empty)",
+            "phase": turn["phase"],
+            "turn_id": turn["id"],
+        }
+
+    async def inspect_agent(self, agent: str) -> list[str]:
+        payload = await self.inspect_agent_payload(agent)
         lines = [
-            f"Agent: {agent}",
-            f"Runtime: {self.transport.describe_agent(agent) or agent_runtime_ref(self.state, agent)}",
-            f"Workspace: {agent_state['workspace']}",
-            f"Prompt: {turn_agent.get('prompt_path', '') or '(none)'}",
-            f"Session prompt: {turn_agent.get('session_prompt_path', '') or '(none)'}",
-            f"Raw log: {agent_state['raw_log_path']}",
-            f"Turn log: {turn_agent.get('turn_log_path', '') or '(none)'}",
-            f"Result file: {turn_agent.get('result_path', '') or '(none)'}",
-            f"Status: {turn_agent['status']}",
+            f"Agent: {payload['agent']}",
+            f"Runtime: {payload['runtime']}",
+            f"Workspace: {payload['workspace']}",
+            f"Prompt: {payload['prompt_path'] or '(none)'}",
+            f"Session prompt: {payload['session_prompt_path'] or '(none)'}",
+            f"Raw log: {payload['raw_log_path']}",
+            f"Turn log: {payload['turn_log_path'] or '(none)'}",
+            f"Result file: {payload['result_path'] or '(none)'}",
+            f"Status: {payload['status']}",
         ]
-        if turn_agent.get("parse_error"):
-            lines.append(f"Parse error: {turn_agent['parse_error']}")
-        if turn_agent.get("result"):
+        if payload["parse_error"]:
+            lines.append(f"Parse error: {payload['parse_error']}")
+        if payload["result"]:
             lines.append("Parsed result:")
-            lines.append(json.dumps(turn_agent["result"], indent=2, ensure_ascii=True))
+            lines.append(json.dumps(payload["result"], indent=2, ensure_ascii=True))
         lines.extend(
             [
                 "",
                 "Recent turn log:",
-                read_file_tail(Path(turn_agent["turn_log_path"]), lines=40),
+                payload["turn_log_tail"],
                 "",
                 "Recent pane capture:",
-                sanitize_terminal_text(pane_capture).strip() or "(empty)",
+                payload["pane_capture"],
             ]
         )
         return lines
+
+    def command_schema(self) -> dict[str, list[str]]:
+        return {
+            "running": allowed_supervisor_commands("running", next_phase="future-phase"),
+            "boundary": allowed_supervisor_commands("boundary", next_phase="future-phase"),
+        }
 
     async def handle_command(
         self,
@@ -255,13 +308,9 @@ class QueueSupervisor:
         lower = command.lower()
         if lower in {"h", "help", "?"}:
             if mode == "boundary":
-                self.log(
-                    "Commands: continue, status, tail claude, tail codex, inspect claude, inspect codex, show final-plan, show package, show diff, show manifest, note both, abort",
-                )
+                self.log("Commands: " + ", ".join(allowed_supervisor_commands("boundary", next_phase=next_phase)))
             else:
-                self.log(
-                    "Commands while running: status, tail claude, tail codex, inspect claude, inspect codex, show final-plan, show package, show diff, show manifest, note both, wait, abort",
-                )
+                self.log("Commands while running: " + ", ".join(allowed_supervisor_commands("running", next_phase=next_phase)))
             return None
         if lower == "status":
             for line in self.status_lines():
@@ -318,8 +367,10 @@ class QueueSupervisor:
             if mode != "boundary":
                 self.log("The current turn is still running. Use wait or keep watching the panes.")
                 return None
+            clear_boundary_state(self.state, resolution="continue")
             return "continue"
         if lower == "abort":
+            clear_boundary_state(self.state, resolution="abort")
             return "abort"
         self.log(f"Unknown command: {command}")
         return None
@@ -376,9 +427,7 @@ class QueueSupervisor:
             self.log("No later phase remains.")
         else:
             self.log(f"Next phase: {next_phase}")
-        self.log(
-            "Boundary commands: continue, status, tail claude, tail codex, inspect claude, inspect codex, show final-plan, show package, show diff, show manifest, note both, abort",
-        )
+        self.log("Boundary commands: " + ", ".join(allowed_supervisor_commands("boundary", next_phase=next_phase)))
         while True:
             self.emit_boundary_prompt()
             item = await self._next_command(timeout=None)
