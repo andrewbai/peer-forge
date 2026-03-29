@@ -31,6 +31,7 @@ from live_state import (
     find_turn,
     peer_agent,
     persist_final_candidate,
+    persist_report,
     phase_label,
     phase_summary_text,
     prompt_file_message,
@@ -681,8 +682,6 @@ class RunLoop:
         self.state["summary"]["execution_approved"] = False
         save_state(self.state)
         if not final_approved:
-            from live_state import persist_report
-
             persist_report(self.state)
             self.supervisor.log(
                 f"Live run finished at plan stage. plan_approved={final_approved}. Report: {report_path(self.state)}",
@@ -752,8 +751,6 @@ class RunLoop:
             )
         else:
             if self.state["signoff_rounds"] == 0:
-                from live_state import persist_report
-
                 self.state["status"] = "needs-attention"
                 self.state["summary"]["execution_approved"] = False
                 self.state["summary"]["final_approved"] = False
@@ -829,8 +826,6 @@ class RunLoop:
                 next_phase=f"execution-fix-round-{next_fix_round}",
             )
             execution_fix_round = next_fix_round
-
-        from live_state import persist_report
 
         self.state["status"] = "approved" if execution_approved else "needs-attention"
         self.state["summary"]["execution_approved"] = execution_approved
